@@ -198,7 +198,20 @@ def open_position(
         }
         
         # Use direct private post to bypass CCXT mapping issues
-        order = ex.private_post_spot_v2_trade_place_order(params)
+        try:
+            order = ex.private_post_spot_v2_trade_place_order(params)
+        except Exception as e:
+            error_msg = str(e)
+            if "Insufficient balance" in error_msg:
+                friendly_error = "❌ <b>Trade Failed: Insufficient Balance</b>\nYour Spot balance is too low for this trade."
+            elif "permission" in error_msg.lower():
+                friendly_error = "❌ <b>Trade Failed: API Permissions</b>\nPlease enable 'Spot Trade' for your API Key."
+            else:
+                friendly_error = f"❌ <b>Trade Failed:</b>\n<code>{error_msg}</code>"
+            
+            from telegram_bot import send_telegram_msg
+            send_telegram_msg(f"{symbol}\n{friendly_error}")
+            raise e
         
         qty = float(order.get('filled', 0) or order.get('amount', 0))
         if qty <= 0:

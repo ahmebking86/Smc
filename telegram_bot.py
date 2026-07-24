@@ -806,6 +806,18 @@ def alert_trade_opened(symbol: str, trade) -> None:
     )
 
 
+def alert_trade_opened(symbol: str, trade) -> None:
+    disp = normalize_symbol(symbol)
+    send_alert(
+        f"✅ <b>Trade Opened — {html.escape(disp)}</b>\n\n"
+        f"Entry:    <b>{trade.buy_price:.6f}</b>\n"
+        f"Qty:      <b>{trade.qty:.6f}</b>\n"
+        f"SL:       <b>{trade.stop_loss:.6f}</b>\n"
+        f"TP:       <b>{trade.take_profit:.6f}</b>\n"
+        f"Order ID: <code>{trade.bitget_order_id or 'N/A'}</code>"
+    )
+
+
 def alert_trade_closed(trade, price: float, pnl: float, reason: str) -> None:
     disp = normalize_symbol(trade.symbol)
     emoji = "🟢" if pnl >= 0 else "🔴"
