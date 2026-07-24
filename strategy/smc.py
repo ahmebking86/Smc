@@ -324,8 +324,13 @@ def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
         return None
 
     # Stale zone check: price already well above zone
-    if current_price > zone_top * 1.01:
+    if current_price > zone_top:
         logger.debug("Price %.6f already above zone %.6f — stale, skipping", current_price, zone_top)
+        return None
+
+    # Price must be close to the zone (within 1 ATR) to avoid "random" alerts
+    if current_price > zone_top + atr_val:
+        logger.debug("Price %.6f too far from zone %.6f — skipping", current_price, zone_top)
         return None
 
     return TradeSignal(

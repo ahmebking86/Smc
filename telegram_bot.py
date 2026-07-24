@@ -153,7 +153,8 @@ def _main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📋 My Pairs",      callback_data="pairs"),
         ],
         [
-            InlineKeyboardButton("🌐 Load Top Pairs", callback_data="load_top_menu"),
+            InlineKeyboardButton("➕ Add Bulk",       callback_data="add_bulk"),
+            InlineKeyboardButton("🌐 Load Top",       callback_data="load_top_menu"),
         ],
         [
             InlineKeyboardButton("🚨 Close ALL",     callback_data="closeall"),
@@ -522,6 +523,39 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             _waiting_for.pop(user_id, None)
 
+    elif state == "bulk_pairs":
+        raw = (update.effective_message.text or "").strip()
+        import re
+        # Split by comma, space, or newline
+        symbols = re.split(r'[,\s\n]+', raw)
+        valid_symbols = []
+        for s in symbols:
+            s = normalize_symbol(s)
+            if "/" in s and s not in valid_symbols:
+                valid_symbols.append(s)
+        
+        if not valid_symbols:
+            await update.effective_message.reply_text(
+                "❌ No valid symbols found. Please use <code>BASE/QUOTE</code> format.",
+                parse_mode="HTML",
+            )
+            return
+
+        # Limit to 50 total
+        current_pairs = get_active_pairs()
+        new_list = list(dict.fromkeys(current_pairs + valid_symbols))[:50]
+        set_active_pairs(new_list)
+        
+        added_count = len(new_list) - len(current_pairs)
+        await update.effective_message.reply_text(
+            f"✅ Processed bulk request.\n"
+            f"Added: <b>{added_count}</b> new pairs.\n"
+            f"Total active: <b>{len(new_list)}/50</b>.\n\n"
+            f"Type /menu to go back.",
+            parse_mode="HTML",
+        )
+        _waiting_for.pop(user_id, None)
+
 
 # ── Inline button router ──────────────────────────────────────────────────────
 
@@ -689,6 +723,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 f"❌ Error: <code>{html.escape(str(exc))}</code>",
                 parse_mode="HTML",
             )
+
+    # ── Add Bulk Pairs ────────────────────────────────────────────────────────
+    elif data == "add_bulk":
+        _waiting_for[update.effective_user.id] = "bulk_pairs"
+        await update.effective_message.reply_text(
+            "➕ <b>Add Bulk Pairs</b>\n\n"
+            "Please send a list of symbols separated by commas or spaces.\n"
+            "Maximum 50 pairs total.\n\n"
+            "Example: <code>BTC/USDT, ETH/USDT, SOL/USDT</code>",
+            parse_mode="HTML",
+        )
 
     else:
         logger.warning("Unknown callback_data: %s", data)

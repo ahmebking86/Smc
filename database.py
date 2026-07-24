@@ -20,7 +20,14 @@ _url = DATABASE_URL
 if _url.startswith("postgres://"):
     _url = _url.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+engine = create_engine(
+    _url,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=300,
+    connect_args={"connect_timeout": 10}
+)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 

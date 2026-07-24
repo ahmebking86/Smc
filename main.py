@@ -151,12 +151,16 @@ def trading_loop() -> None:
                         ): pair
                         for pair in pairs
                     }
-                    for fut in as_completed(futures, timeout=55):
-                        pair = futures[fut]
-                        try:
-                            fut.result()
-                        except Exception as exc:
-                            logger.error("scan worker %s raised: %s", pair, exc)
+                    # Use a shorter timeout to prevent the loop from hanging
+                    try:
+                        for fut in as_completed(futures, timeout=45):
+                            pair = futures[fut]
+                            try:
+                                fut.result()
+                            except Exception as exc:
+                                logger.error("scan worker %s raised: %s", pair, exc)
+                    except TimeoutError:
+                        logger.warning("Scan cycle timed out — some pairs skipped")
             else:
                 logger.info("Trading paused — skipping scan")
 
