@@ -154,11 +154,11 @@ def open_position(
                 db_log("WARN", msg)
                 return None
             
-            # For Bitget spot market buy, we can pass the cost in USDT directly as 'amount'
-            # and set 'createMarketBuyOrderRequiresPrice': False
+            # For Bitget spot market buy, we MUST pass the price to calculate cost
+            # or use create_market_buy_order with the cost in USDT
             sizing_note = f"fixed ${trade_amount_usdt:.2f} USDT"
-            params = {'createMarketBuyOrderRequiresPrice': False}
-            order = ex.create_market_buy_order(symbol, trade_amount_usdt, params)
+            # Bitget market buy: amount is the cost in USDT
+            order = ex.create_market_buy_order(symbol, trade_amount_usdt)
             qty = float(order.get('filled', 0) or order.get('amount', 0))
         else:
             qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
@@ -168,8 +168,14 @@ def open_position(
                 logger.warning("Position size is zero for %s (%s) — skipping", symbol, sizing_note)
                 return None
             
-            # If using risk-based qty, we need to pass the entry price to calculate cost
-            order = ex.create_market_order(symbol, "buy", qty, signal.entry)
+            # For Bitget market buy with specific qty, we still need to pass price
+            # but it's safer to convert to cost (qty * entry) and use market_buy
+            cost = qty * signal.entry
+            if cost < 5.0:
+                logger.warning("Cost %.2f below Bitget minimum 5 USDT — skipping %s", cost, symbol)
+                return None
+            order = ex.create_market_buy_order(symbol, cost)
+            qty = float(order.get('filled', 0) or order.get('amount', 0))
         order_id = str(order.get("id", ""))
         actual_price = float(order.get("average") or order.get("price") or signal.entry)
 
