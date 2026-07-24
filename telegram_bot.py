@@ -157,6 +157,7 @@ def _main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🌐 Load Top",       callback_data="load_top_menu"),
         ],
         [
+            InlineKeyboardButton("🔑 Setup API",     callback_data="setup_api"),
             InlineKeyboardButton("🚨 Close ALL",     callback_data="closeall"),
         ],
     ])
@@ -523,6 +524,29 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             _waiting_for.pop(user_id, None)
 
+    elif state == "api_setup":
+        raw = (update.effective_message.text or "").strip()
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) != 3:
+            await update.effective_message.reply_text(
+                "❌ Invalid format. Please use: <code>KEY, SECRET, PASSPHRASE</code>",
+                parse_mode="HTML",
+            )
+            return
+        
+        from database import set_api_keys
+        from trading.executor import _reset_exchange
+        set_api_keys(parts[0], parts[1], parts[2])
+        _reset_exchange()
+        
+        await update.effective_message.reply_text(
+            "✅ <b>API Credentials Updated!</b>\n"
+            "The bot will now use these keys for trading.\n\n"
+            "Type /menu to go back.",
+            parse_mode="HTML",
+        )
+        _waiting_for.pop(user_id, None)
+
     elif state == "bulk_pairs":
         raw = (update.effective_message.text or "").strip()
         import re
@@ -732,6 +756,18 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "Please send a list of symbols separated by commas or spaces.\n"
             "Maximum 50 pairs total.\n\n"
             "Example: <code>BTC/USDT, ETH/USDT, SOL/USDT</code>",
+            parse_mode="HTML",
+        )
+
+    # ── Setup API ─────────────────────────────────────────────────────────────
+    elif data == "setup_api":
+        _waiting_for[update.effective_user.id] = "api_setup"
+        await update.effective_message.reply_text(
+            "🔑 <b>Setup Bitget API</b>\n\n"
+            "Please send your API credentials in this format:\n"
+            "<code>API_KEY, SECRET, PASSPHRASE</code>\n\n"
+            "Example:\n"
+            "<code>bg_xxxx, 12345678, mypass123</code>",
             parse_mode="HTML",
         )
 

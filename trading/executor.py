@@ -19,10 +19,22 @@ logger = logging.getLogger(__name__)
 # ── Exchange singleton ────────────────────────────────────────────────────────
 
 def make_exchange() -> ccxt.bitget:
+    # Try to get credentials from DB first
+    from database import get_settings
+    try:
+        settings = get_settings()
+        api_key = settings.bitget_api_key or BITGET_API_KEY
+        api_secret = settings.bitget_api_secret or BITGET_SECRET
+        passphrase = settings.bitget_passphrase or BITGET_PASSPHRASE
+    except Exception:
+        api_key = BITGET_API_KEY
+        api_secret = BITGET_SECRET
+        passphrase = BITGET_PASSPHRASE
+
     ex = ccxt.bitget({
-        "apiKey": BITGET_API_KEY,
-        "secret": BITGET_SECRET,
-        "password": BITGET_PASSPHRASE,
+        "apiKey": api_key,
+        "secret": api_secret,
+        "password": passphrase,
         "options": {"defaultType": "spot"},
     })
     ex.load_markets()

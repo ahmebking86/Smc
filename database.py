@@ -68,6 +68,9 @@ class BotSettings(Base):
     active_pairs: Mapped[str] = mapped_column(Text, default="BTC/USDT,ETH/USDT")
     trade_amount_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
     timeframe: Mapped[str] = mapped_column(String(10), default="15m")
+    bitget_api_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    bitget_api_secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    bitget_passphrase: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
 class BotLog(Base):
@@ -96,6 +99,10 @@ def _migrate_existing_schema(conn) -> None:
         # Add timeframe to bot_settings if missing
         """ALTER TABLE bot_settings
            ADD COLUMN IF NOT EXISTS timeframe VARCHAR(10) DEFAULT '15m'""",
+        # Add API keys to bot_settings if missing
+        """ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS bitget_api_key VARCHAR(255)""",
+        """ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS bitget_api_secret VARCHAR(255)""",
+        """ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS bitget_passphrase VARCHAR(255)""",
     ]
     for stmt in migrations:
         try:
@@ -175,6 +182,20 @@ def set_timeframe(tf: str) -> None:
 def set_active_pairs(pairs: list[str]) -> None:
     with SessionLocal() as s:
         s.execute(update(BotSettings).where(BotSettings.id == 1).values(active_pairs=",".join(pairs)))
+        s.commit()
+
+
+def set_api_keys(api_key: str, secret: str, passphrase: str) -> None:
+    with SessionLocal() as s:
+        s.execute(
+            update(BotSettings)
+            .where(BotSettings.id == 1)
+            .values(
+                bitget_api_key=api_key,
+                bitget_api_secret=secret,
+                bitget_passphrase=passphrase
+            )
+        )
         s.commit()
 
 
