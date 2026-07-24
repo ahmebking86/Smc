@@ -28,7 +28,7 @@ logger = logging.getLogger("main")
 # ── Signal cooldown ───────────────────────────────────────────────────────────
 # Prevents duplicate alerts when the same candle pattern persists across
 # multiple 60-second scan cycles.
-SIGNAL_COOLDOWN_SECONDS = 300   # 5 minutes per symbol
+SIGNAL_COOLDOWN_SECONDS = 60    # Reduced to 1 minute to be more responsive
 _last_signal_time: dict[str, float] = {}
 
 

@@ -329,16 +329,16 @@ def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
         logger.debug("Price %.6f already above zone %.6f — stale, skipping", current_price, zone_top)
         return None
 
-    # 2. Distance: Price must be very close to the zone (within 0.5 ATR)
-    # This prevents catching "random" alerts far from the actual setup.
-    if current_price > zone_top + (atr_val * 0.5):
-        logger.debug("Price %.6f too far from zone %.6f (dist > 0.5 ATR) — skipping", current_price, zone_top)
+    # 2. Distance: Price must be reasonably close to the zone (within 1.5 ATR)
+    # We increased this from 0.5 to 1.5 to be more active.
+    if current_price > zone_top + (atr_val * 1.5):
+        logger.debug("Price %.6f too far from zone %.6f (dist > 1.5 ATR) — skipping", current_price, zone_top)
         return None
     
-    # 3. Trend alignment: Ensure we are not catching a falling knife
-    # Price should be starting to bounce or at least stabilising
-    if current_price < zone_bottom:
-         logger.debug("Price %.6f below zone bottom %.6f — potential breakdown, skipping", current_price, zone_bottom)
+    # 3. Trend alignment: Safety buffer below zone
+    # Allow a small 0.5 ATR penetration below zone bottom to catch deep retests
+    if current_price < zone_bottom - (atr_val * 0.5):
+         logger.debug("Price %.6f too far below zone bottom %.6f — breakdown, skipping", current_price, zone_bottom)
          return None
 
     return TradeSignal(
