@@ -1,7 +1,6 @@
 """main.py — Entry point: starts health server, Telegram bot, and trading loop."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
@@ -30,10 +29,8 @@ logger = logging.getLogger("main")
 
 def ohlcv_to_df(raw: list) -> pd.DataFrame:
     df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["open"]  = df["open"].astype(float)
-    df["high"]  = df["high"].astype(float)
-    df["low"]   = df["low"].astype(float)
-    df["close"] = df["close"].astype(float)
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = df[col].astype(float)
     return df.reset_index(drop=True)
 
 
@@ -75,7 +72,7 @@ def trading_loop() -> None:
         try:
             cfg = get_settings()
 
-            # Monitor existing trades for SL/TP
+            # Monitor existing trades for SL/TP hits
             alerts = monitor_open_trades()
             for a in alerts:
                 alert_trade_closed(a["trade"], a["price"], a["pnl"], a["reason"])

@@ -1,6 +1,7 @@
 """telegram_bot.py — Telegram control panel + alert sender."""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import threading
@@ -9,7 +10,7 @@ from typing import Optional
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, ConversationHandler, filters,
+    MessageHandler, ContextTypes, filters,
 )
 from telegram.error import TelegramError
 
@@ -21,8 +22,9 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-# Conversation states
-AWAIT_RISK, AWAIT_PAIRS = range(2)
+# ── Event loop for the bot thread ─────────────────────────────────────────────
+_bot_loop: Optional[asyncio.AbstractEventLoop] = None
+
 
 # ── Singleton bot for sending alerts ─────────────────────────────────────────
 
@@ -37,28 +39,37 @@ def get_bot() -> Bot:
 
 
 def send_alert(text: str) -> None:
-    """Send a message to the admin chat (blocking, called from trading loop)."""
-    try:
-        import asyncio
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(
-            get_bot().send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode="HTML",
-            )
+    """Send a message to the admin chat from any thread."""
+    # BUG FIX: use the bot thread's event loop if available,
+    # otherwise create a temporary one — avoids "no running event loop" errors
+    async def _send():
+        await get_bot().send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode="HTML",
         )
-        loop.close()
+
+    try:
+        if _bot_loop and _bot_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_send(), _bot_loop)
+        else:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_send())
+            loop.close()
     except TelegramError as exc:
         logger.error("Telegram send failed: %s", exc)
+    except Exception as exc:
+        logger.error("send_alert error: %s", exc)
 
 
 # ── Auth guard ────────────────────────────────────────────────────────────────
+# BUG FIX: use effective_message instead of update.message
+# (update.message is None when coming from a callback query button press)
 
 def admin_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user and update.effective_user.id != TELEGRAM_CHAT_ID:
-            await update.message.reply_text("⛔ Unauthorized")
+            await update.effective_message.reply_text("⛔ Unauthorized")
             return
         return await func(update, ctx)
     wrapper.__name__ = func.__name__
@@ -86,7 +97,7 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"Status:   <b>{mode}</b>\n"
         f"Balance:  <b>{balance_str} USDT</b>\n"
         f"Risk:     <b>{cfg.risk_percent}%</b>\n"
-        f"Pairs:    <b>{cfg.active_pairs}</b>\n\n"
+        f"Pairs:    <b>{html.escape(cfg.active_pairs)}</b>\n\n"
         f"Open trades:  <b>{len(trades)}</b>\n"
         f"Today PnL:    <b>${stats['pnl']:.2f}</b> ({stats['count']} trades)\n"
     )
@@ -97,14 +108,11 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton("⚡ Toggle",    callback_data="toggle"),
         ],
         [
-            InlineKeyboardButton("💰 Set Risk",  callback_data="setrisk"),
             InlineKeyboardButton("🔗 Pairs",     callback_data="pairs"),
-        ],
-        [
             InlineKeyboardButton("🚨 Close ALL", callback_data="closeall"),
         ],
     ])
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
@@ -118,15 +126,14 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines = ["📈 <b>Open Trades</b>\n"]
         for t in trades:
             lines.append(
-                f"• <b>{t.symbol}</b> [{t.side.upper()}]\n"
+                f"• <b>{html.escape(t.symbol)}</b> [{t.side.upper()}]\n"
                 f"  Entry: {t.entry_price:.6f}\n"
                 f"  SL: <b>{t.stop_loss:.6f}</b>  TP: <b>{t.take_profit:.6f}</b>\n"
-                f"  Signal: {t.signal_type}\n"
+                f"  Signal: {t.signal_type or '-'}\n"
             )
         msg = "\n".join(lines)
 
-    target = update.message or update.callback_query.message
-    await target.reply_text(msg, parse_mode="HTML")
+    await update.effective_message.reply_text(msg, parse_mode="HTML")
 
 
 # ── /toggle ───────────────────────────────────────────────────────────────────
@@ -137,34 +144,40 @@ async def cmd_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     new_state = not cfg.trading_enabled
     set_trading_enabled(new_state)
     label = "🟢 Enabled" if new_state else "🔴 Paused"
-    msg = f"Trading is now <b>{label}</b>"
-    target = update.message or update.callback_query.message
-    await target.reply_text(msg, parse_mode="HTML")
+    await update.effective_message.reply_text(
+        f"Trading is now <b>{label}</b>", parse_mode="HTML"
+    )
 
 
 # ── /setrisk ──────────────────────────────────────────────────────────────────
+# BUG FIX: removed ConversationHandler — it can't be triggered from a button press.
+# Now /setrisk accepts the value directly: /setrisk 1.5
 
 @admin_only
-async def cmd_setrisk_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = get_settings()
-    target = update.message or update.callback_query.message
-    await target.reply_text(
-        f"💰 Current risk: <b>{cfg.risk_percent}%</b>\n\nSend new risk % (e.g. <code>1.5</code>):",
-        parse_mode="HTML",
-    )
-    return AWAIT_RISK
 
+    if not ctx.args:
+        await update.effective_message.reply_text(
+            f"💰 Current risk: <b>{cfg.risk_percent}%</b>\n\n"
+            f"Usage: <code>/setrisk 1.5</code>  (0.1 – 10)",
+            parse_mode="HTML",
+        )
+        return
 
-async def cmd_setrisk_recv(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        val = float(update.message.text.strip())
+        val = float(ctx.args[0])
         if not 0.1 <= val <= 10:
             raise ValueError
         set_risk_percent(val)
-        await update.message.reply_text(f"✅ Risk set to <b>{val}%</b>", parse_mode="HTML")
+        await update.effective_message.reply_text(
+            f"✅ Risk set to <b>{val}%</b>", parse_mode="HTML"
+        )
     except ValueError:
-        await update.message.reply_text("❌ Invalid value. Enter a number between 0.1 and 10.")
-    return ConversationHandler.END
+        await update.effective_message.reply_text(
+            "❌ Invalid value. Use a number between 0.1 and 10.\nExample: <code>/setrisk 1.5</code>",
+            parse_mode="HTML",
+        )
 
 
 # ── /pairs ────────────────────────────────────────────────────────────────────
@@ -172,10 +185,10 @@ async def cmd_setrisk_recv(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
 @admin_only
 async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pairs = get_active_pairs()
-    target = update.message or update.callback_query.message
-    await target.reply_text(
+    await update.effective_message.reply_text(
         f"🔗 <b>Active pairs:</b>\n{chr(10).join(pairs)}\n\n"
-        f"Use /addpair SYMBOL or /removepair SYMBOL\nExample: <code>/addpair BTC/USDT:USDT</code>",
+        f"Add:    <code>/addpair BTC/USDT:USDT</code>\n"
+        f"Remove: <code>/removepair ETH/USDT:USDT</code>",
         parse_mode="HTML",
     )
 
@@ -183,45 +196,56 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 @admin_only
 async def cmd_addpair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
-        await update.message.reply_text("Usage: /addpair BTC/USDT:USDT")
+        await update.effective_message.reply_text("Usage: /addpair BTC/USDT:USDT")
         return
     symbol = ctx.args[0].upper()
     pairs = get_active_pairs()
     if symbol not in pairs:
         pairs.append(symbol)
         set_active_pairs(pairs)
-        await update.message.reply_text(f"✅ Added <b>{html.escape(symbol)}</b>", parse_mode="HTML")
+        await update.effective_message.reply_text(
+            f"✅ Added <b>{html.escape(symbol)}</b>", parse_mode="HTML"
+        )
     else:
-        await update.message.reply_text(f"⚠️ Already in list: {html.escape(symbol)}")
+        await update.effective_message.reply_text(
+            f"⚠️ Already in list: {html.escape(symbol)}"
+        )
 
 
 @admin_only
 async def cmd_removepair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
-        await update.message.reply_text("Usage: /removepair BTC/USDT:USDT")
+        await update.effective_message.reply_text("Usage: /removepair BTC/USDT:USDT")
         return
     symbol = ctx.args[0].upper()
     pairs = get_active_pairs()
     if symbol in pairs:
         pairs.remove(symbol)
         set_active_pairs(pairs)
-        await update.message.reply_text(f"✅ Removed <b>{html.escape(symbol)}</b>", parse_mode="HTML")
+        await update.effective_message.reply_text(
+            f"✅ Removed <b>{html.escape(symbol)}</b>", parse_mode="HTML"
+        )
     else:
-        await update.message.reply_text(f"⚠️ Not in list: {html.escape(symbol)}")
+        await update.effective_message.reply_text(
+            f"⚠️ Not in list: {html.escape(symbol)}"
+        )
 
 
 # ── /closeall ─────────────────────────────────────────────────────────────────
 
 @admin_only
 async def cmd_closeall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    target = update.message or update.callback_query.message
-    await target.reply_text("🚨 Closing all positions…")
+    await update.effective_message.reply_text("🚨 Closing all positions…")
     try:
         from trading.executor import close_all_positions
         count = close_all_positions()
-        await target.reply_text(f"✅ Closed <b>{count}</b> position(s).", parse_mode="HTML")
+        await update.effective_message.reply_text(
+            f"✅ Closed <b>{count}</b> position(s).", parse_mode="HTML"
+        )
     except Exception as exc:
-        await target.reply_text(f"❌ Error: {html.escape(str(exc))}", parse_mode="HTML")
+        await update.effective_message.reply_text(
+            f"❌ Error: {html.escape(str(exc))}", parse_mode="HTML"
+        )
 
 
 # ── Inline button router ──────────────────────────────────────────────────────
@@ -239,8 +263,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await cmd_pairs(update, ctx)
     elif data == "closeall":
         await cmd_closeall(update, ctx)
-    elif data == "setrisk":
-        await cmd_setrisk_start(update, ctx)
 
 
 # ── Alert formatters ──────────────────────────────────────────────────────────
@@ -293,35 +315,49 @@ def alert_error(context: str, exc: Exception) -> None:
 def build_app() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    risk_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("setrisk", cmd_setrisk_start),
-        ],
-        states={AWAIT_RISK: [MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_setrisk_recv)]},
-        fallbacks=[],
-    )
-
     app.add_handler(CommandHandler(["start", "menu"], cmd_menu))
     app.add_handler(CommandHandler("status",     cmd_status))
     app.add_handler(CommandHandler("toggle",     cmd_toggle))
+    app.add_handler(CommandHandler("setrisk",    cmd_setrisk))
     app.add_handler(CommandHandler("pairs",      cmd_pairs))
     app.add_handler(CommandHandler("addpair",    cmd_addpair))
     app.add_handler(CommandHandler("removepair", cmd_removepair))
     app.add_handler(CommandHandler("closeall",   cmd_closeall))
-    app.add_handler(risk_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
 
     return app
 
 
 def run_bot_in_thread(app: Application) -> None:
-    """Run the Telegram bot in a background thread (polling)."""
-    def _run():
-        import asyncio
+    """
+    BUG FIX: PTB v21 run_polling() installs OS signal handlers which only
+    work from the main thread — calling it from a daemon thread raises
+    ValueError: signal only works in main thread.
+
+    Fix: call the lower-level initialize/start/start_polling directly
+    without the signal-handler wrapper, then keep the loop alive.
+    """
+    global _bot_loop
+
+    async def _run():
+        global _bot_loop
+        _bot_loop = asyncio.get_running_loop()
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Telegram bot polling started")
+        # Keep the coroutine alive indefinitely
+        while True:
+            await asyncio.sleep(3600)
+
+    def _thread():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(app.run_polling(drop_pending_updates=True))
+        try:
+            loop.run_until_complete(_run())
+        except Exception as exc:
+            logger.error("Telegram bot thread error: %s", exc)
 
-    t = threading.Thread(target=_run, name="telegram-bot", daemon=True)
+    t = threading.Thread(target=_thread, name="telegram-bot", daemon=True)
     t.start()
-    logger.info("Telegram bot started")
+    logger.info("Telegram bot thread started")

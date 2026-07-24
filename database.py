@@ -9,7 +9,8 @@ from sqlalchemy import (
     Boolean, DateTime, Float, Integer, String, Text,
     create_engine, select, update, func
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+# BUG FIX: removed unused 'Session' import
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from config import DATABASE_URL
 
@@ -35,7 +36,7 @@ class Trade(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(30), nullable=False)
-    side: Mapped[str] = mapped_column(String(5), nullable=False)           # long / short
+    side: Mapped[str] = mapped_column(String(5), nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
@@ -44,7 +45,7 @@ class Trade(Base):
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_closed: Mapped[bool] = mapped_column(Boolean, default=False)
     close_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    signal_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # BOS/CHoCH/OB/FVG
+    signal_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     bitget_order_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
