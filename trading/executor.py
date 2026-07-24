@@ -164,8 +164,17 @@ def open_position(
 
         # Bitget market buy: we pass the cost in USDT as the 'amount'
         # and we MUST set createMarketBuyOrderRequiresPrice: False in params
-        params = {'createMarketBuyOrderRequiresPrice': False}
-        order = ex.create_order(symbol, 'market', 'buy', cost, None, params)
+        # IMPORTANT: Bitget market buy 'amount' is actually the COST in USDT
+        params = {
+            'createMarketBuyOrderRequiresPrice': False,
+            'cost': cost  # Some CCXT versions prefer this
+        }
+        try:
+            # Try specific market buy method first
+            order = ex.create_market_buy_order(symbol, cost, params)
+        except Exception as e:
+            logger.warning("create_market_buy_order failed, trying generic create_order: %s", e)
+            order = ex.create_order(symbol, 'market', 'buy', cost, None, params)
         
         qty = float(order.get('filled', 0) or order.get('amount', 0))
         if qty <= 0:
