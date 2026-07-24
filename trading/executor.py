@@ -35,8 +35,18 @@ def make_exchange() -> ccxt.bitget:
         "apiKey": api_key,
         "secret": api_secret,
         "password": passphrase,
-        "options": {"defaultType": "spot"},
+        "options": {
+            "defaultType": "spot",
+            "createMarketBuyOrderRequiresPrice": False,
+            "api-version": "v2"  # Force v2 API
+        },
     })
+    # Set headers to match Bitget v2 requirements
+    ex.headers = {
+        "ACCESS-KEY": api_key,
+        "ACCESS-PASSPHRASE": passphrase,
+        "locale": "en-US",
+    }
     ex.load_markets()
     return ex
 
@@ -174,19 +184,15 @@ def open_position(
             db_log("WARN", msg)
             return None
 
-        # Bitget market buy: we pass the cost in USDT as the 'amount'
-        # and we MUST set createMarketBuyOrderRequiresPrice: False in params
-        # IMPORTANT: Bitget market buy 'amount' is actually the COST in USDT
+        # ── Bitget v2 Spot Market Buy ──
+        # In v2 Spot, market buy uses 'size' as the USDT cost.
+        # We use the generic create_order but with the specific v2 params.
         params = {
-            'createMarketBuyOrderRequiresPrice': False,
-            'cost': cost  # Some CCXT versions prefer this
+            'orderType': 'market',
+            'force': 'fok',
         }
-        try:
-            # Try specific market buy method first
-            order = ex.create_market_buy_order(symbol, cost, params)
-        except Exception as e:
-            logger.warning("create_market_buy_order failed, trying generic create_order: %s", e)
-            order = ex.create_order(symbol, 'market', 'buy', cost, None, params)
+        # CCXT will map 'amount' to 'size' in the Bitget v2 request
+        order = ex.create_order(symbol, 'market', 'buy', cost, None, params)
         
         qty = float(order.get('filled', 0) or order.get('amount', 0))
         if qty <= 0:
