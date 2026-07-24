@@ -17,6 +17,7 @@ from telegram.error import TelegramError
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from database import (
     get_settings, set_trading_enabled, set_risk_percent,
+    set_trade_amount, set_timeframe,
     set_active_pairs, get_active_pairs, get_open_trades, get_today_stats,
 )
 
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 # ── Event loop for the bot thread ─────────────────────────────────────────────
 _bot_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# ── Per-user conversation state ───────────────────────────────────────────────
+# Tracks what we're waiting for from the admin (e.g. "amount")
+_waiting_for: dict[int, str] = {}
 
 # ── Singleton bot for sending alerts ─────────────────────────────────────────
 
@@ -40,8 +44,6 @@ def get_bot() -> Bot:
 
 def send_alert(text: str) -> None:
     """Send a message to the admin chat from any thread."""
-    # BUG FIX: use the bot thread's event loop if available,
-    # otherwise create a temporary one — avoids "no running event loop" errors
     async def _send():
         await get_bot().send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -63,8 +65,6 @@ def send_alert(text: str) -> None:
 
 
 # ── Auth guard ────────────────────────────────────────────────────────────────
-# BUG FIX: use effective_message instead of update.message
-# (update.message is None when coming from a callback query button press)
 
 def admin_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -74,6 +74,28 @@ def admin_only(func):
         return await func(update, ctx)
     wrapper.__name__ = func.__name__
     return wrapper
+
+
+# ── Helper: build main menu keyboard ─────────────────────────────────────────
+
+def _main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Status",      callback_data="status"),
+            InlineKeyboardButton("⚡ Toggle",      callback_data="toggle"),
+        ],
+        [
+            InlineKeyboardButton("💵 Set Amount",  callback_data="set_amount"),
+            InlineKeyboardButton("⏱ Timeframe",   callback_data="set_tf_menu"),
+        ],
+        [
+            InlineKeyboardButton("💰 Balance",     callback_data="balance"),
+            InlineKeyboardButton("🔗 Pairs",       callback_data="pairs"),
+        ],
+        [
+            InlineKeyboardButton("🚨 Close ALL",   callback_data="closeall"),
+        ],
+    ])
 
 
 # ── /start  /menu ─────────────────────────────────────────────────────────────
@@ -92,30 +114,26 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         balance_str = "N/A"
 
+    # Amount display
+    if cfg.trade_amount_usdt and cfg.trade_amount_usdt > 0:
+        amount_str = f"${cfg.trade_amount_usdt:.2f} USDT (fixed)"
+    else:
+        amount_str = f"{cfg.risk_percent}% risk"
+
     text = (
-        f"🤖 <b>SMC Bitget Bot</b>\n\n"
-        f"Status:   <b>{mode}</b>\n"
-        f"Balance:  <b>{balance_str} USDT</b>\n"
-        f"Risk:     <b>{cfg.risk_percent}%</b>\n"
-        f"Pairs:    <b>{html.escape(cfg.active_pairs)}</b>\n\n"
-        f"Open trades:  <b>{len(trades)}</b>\n"
-        f"Today PnL:    <b>${stats['pnl']:.2f}</b> ({stats['count']} trades)\n"
+        f"🤖 <b>SMC Bitget Bot — Spot Only</b>\n\n"
+        f"Status:      <b>{mode}</b>\n"
+        f"Balance:     <b>{balance_str} USDT</b>\n"
+        f"Amount/Trade:<b> {amount_str}</b>\n"
+        f"Timeframe:   <b>{cfg.timeframe or '15m'}</b>\n"
+        f"Pairs:       <b>{html.escape(cfg.active_pairs)}</b>\n\n"
+        f"Open trades: <b>{len(trades)}</b>\n"
+        f"Today PnL:   <b>${stats['pnl']:.2f}</b> ({stats['count']} trades)\n"
     )
 
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📊 Status",    callback_data="status"),
-            InlineKeyboardButton("⚡ Toggle",    callback_data="toggle"),
-        ],
-        [
-            InlineKeyboardButton("💰 Balance",   callback_data="balance"),
-            InlineKeyboardButton("🔗 Pairs",     callback_data="pairs"),
-        ],
-        [
-            InlineKeyboardButton("🚨 Close ALL", callback_data="closeall"),
-        ],
-    ])
-    await update.effective_message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    await update.effective_message.reply_text(
+        text, parse_mode="HTML", reply_markup=_main_keyboard()
+    )
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
@@ -153,8 +171,6 @@ async def cmd_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ── /setrisk ──────────────────────────────────────────────────────────────────
-# BUG FIX: removed ConversationHandler — it can't be triggered from a button press.
-# Now /setrisk accepts the value directly: /setrisk 1.5
 
 @admin_only
 async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -183,6 +199,85 @@ async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+# ── /setamount ────────────────────────────────────────────────────────────────
+
+@admin_only
+async def cmd_setamount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Set a fixed USDT amount per trade.
+    Usage:  /setamount 100      → trade $100 USDT each signal
+            /setamount 0        → revert to risk-% sizing
+    """
+    cfg = get_settings()
+
+    if not ctx.args:
+        current = f"${cfg.trade_amount_usdt:.2f} USDT" if cfg.trade_amount_usdt else f"{cfg.risk_percent}% risk"
+        await update.effective_message.reply_text(
+            f"💵 <b>Trade Amount</b>\n"
+            f"Current: <b>{current}</b>\n\n"
+            f"Set fixed USDT per trade:\n"
+            f"  <code>/setamount 100</code>  → $100 per trade\n"
+            f"  <code>/setamount 0</code>    → revert to risk-% sizing",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        val = float(ctx.args[0])
+        if val < 0:
+            raise ValueError
+        if val == 0:
+            set_trade_amount(None)
+            cfg2 = get_settings()
+            await update.effective_message.reply_text(
+                f"✅ Reverted to risk-% sizing (<b>{cfg2.risk_percent}%</b>)", parse_mode="HTML"
+            )
+        else:
+            set_trade_amount(val)
+            await update.effective_message.reply_text(
+                f"✅ Trade amount set to <b>${val:.2f} USDT</b> per signal", parse_mode="HTML"
+            )
+    except ValueError:
+        await update.effective_message.reply_text(
+            "❌ Invalid value. Example: <code>/setamount 100</code>", parse_mode="HTML"
+        )
+
+
+# ── /settimeframe ─────────────────────────────────────────────────────────────
+
+VALID_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
+
+
+@admin_only
+async def cmd_settimeframe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Usage: /settimeframe 15m"""
+    cfg = get_settings()
+
+    if not ctx.args:
+        opts = "  ".join(f"<code>{tf}</code>" for tf in VALID_TIMEFRAMES)
+        await update.effective_message.reply_text(
+            f"⏱ <b>Timeframe</b>\n"
+            f"Current: <b>{cfg.timeframe or '15m'}</b>\n\n"
+            f"Available: {opts}\n\n"
+            f"Usage: <code>/settimeframe 1h</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    tf = ctx.args[0].lower()
+    if tf not in VALID_TIMEFRAMES:
+        opts = ", ".join(VALID_TIMEFRAMES)
+        await update.effective_message.reply_text(
+            f"❌ Invalid timeframe. Choose from: {opts}", parse_mode="HTML"
+        )
+        return
+
+    set_timeframe(tf)
+    await update.effective_message.reply_text(
+        f"✅ Timeframe set to <b>{tf}</b>", parse_mode="HTML"
+    )
+
+
 # ── /pairs ────────────────────────────────────────────────────────────────────
 
 @admin_only
@@ -190,8 +285,8 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pairs = get_active_pairs()
     await update.effective_message.reply_text(
         f"🔗 <b>Active pairs:</b>\n{chr(10).join(pairs)}\n\n"
-        f"Add:    <code>/addpair BTC/USDT:USDT</code>\n"
-        f"Remove: <code>/removepair ETH/USDT:USDT</code>",
+        f"Add:    <code>/addpair BTC/USDT</code>\n"
+        f"Remove: <code>/removepair ETH/USDT</code>",
         parse_mode="HTML",
     )
 
@@ -199,7 +294,7 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 @admin_only
 async def cmd_addpair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
-        await update.effective_message.reply_text("Usage: /addpair BTC/USDT:USDT")
+        await update.effective_message.reply_text("Usage: /addpair BTC/USDT")
         return
     symbol = ctx.args[0].upper()
     pairs = get_active_pairs()
@@ -210,15 +305,13 @@ async def cmd_addpair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"✅ Added <b>{html.escape(symbol)}</b>", parse_mode="HTML"
         )
     else:
-        await update.effective_message.reply_text(
-            f"⚠️ Already in list: {html.escape(symbol)}"
-        )
+        await update.effective_message.reply_text(f"Already in list: {html.escape(symbol)}")
 
 
 @admin_only
 async def cmd_removepair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
-        await update.effective_message.reply_text("Usage: /removepair BTC/USDT:USDT")
+        await update.effective_message.reply_text("Usage: /removepair BTC/USDT")
         return
     symbol = ctx.args[0].upper()
     pairs = get_active_pairs()
@@ -229,9 +322,7 @@ async def cmd_removepair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             f"✅ Removed <b>{html.escape(symbol)}</b>", parse_mode="HTML"
         )
     else:
-        await update.effective_message.reply_text(
-            f"⚠️ Not in list: {html.escape(symbol)}"
-        )
+        await update.effective_message.reply_text(f"Not in list: {html.escape(symbol)}")
 
 
 # ── /balance ──────────────────────────────────────────────────────────────────
@@ -242,9 +333,7 @@ async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         from trading.executor import fetch_usdt_balance
         balance = fetch_usdt_balance()
         await update.effective_message.reply_text(
-            f"💰 <b>Account Balance</b>\n\n"
-            f"USDT Available: <b>${balance:.2f}</b>",
-            parse_mode="HTML",
+            f"💰 Spot balance: <b>${balance:.2f} USDT</b>", parse_mode="HTML"
         )
     except Exception as exc:
         await update.effective_message.reply_text(
@@ -269,8 +358,47 @@ async def cmd_closeall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+# ── Free-text message handler (for amount input after button prompt) ───────────
+
+@admin_only
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    state = _waiting_for.get(user_id)
+
+    if state == "amount":
+        text = (update.effective_message.text or "").strip()
+        try:
+            val = float(text)
+            if val < 0:
+                raise ValueError
+            if val == 0:
+                set_trade_amount(None)
+                cfg = get_settings()
+                await update.effective_message.reply_text(
+                    f"✅ Reverted to risk-% sizing (<b>{cfg.risk_percent}%</b>)",
+                    parse_mode="HTML",
+                )
+            else:
+                set_trade_amount(val)
+                await update.effective_message.reply_text(
+                    f"✅ Trade amount set to <b>${val:.2f} USDT</b> per signal\n\n"
+                    f"Type /menu to go back.",
+                    parse_mode="HTML",
+                )
+        except ValueError:
+            await update.effective_message.reply_text(
+                "❌ Please enter a valid number (e.g. <code>100</code> for $100 USDT).\n"
+                "Send <code>0</code> to revert to risk-% sizing.",
+                parse_mode="HTML",
+            )
+        finally:
+            _waiting_for.pop(user_id, None)
+    # else: ignore unrecognised text
+
+
 # ── Inline button router ──────────────────────────────────────────────────────
 
+@admin_only
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -278,14 +406,72 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     if data == "status":
         await cmd_status(update, ctx)
+
     elif data == "toggle":
         await cmd_toggle(update, ctx)
+
     elif data == "balance":
         await cmd_balance(update, ctx)
+
     elif data == "pairs":
         await cmd_pairs(update, ctx)
+
     elif data == "closeall":
         await cmd_closeall(update, ctx)
+
+    # ── Set Amount (prompt user to type the value) ────────────────────────────
+    elif data == "set_amount":
+        cfg = get_settings()
+        current = f"${cfg.trade_amount_usdt:.2f} USDT" if cfg.trade_amount_usdt else f"{cfg.risk_percent}% risk"
+        user_id = update.effective_user.id
+        _waiting_for[user_id] = "amount"
+        await update.effective_message.reply_text(
+            f"💵 <b>Set Trade Amount</b>\n"
+            f"Current: <b>{current}</b>\n\n"
+            f"Reply with the USDT amount to spend per trade.\n"
+            f"Example: <code>100</code> → $100 per trade\n"
+            f"Send <code>0</code> to revert to risk-% sizing.",
+            parse_mode="HTML",
+        )
+
+    # ── Timeframe menu ────────────────────────────────────────────────────────
+    elif data == "set_tf_menu":
+        cfg = get_settings()
+        current_tf = cfg.timeframe or "15m"
+        # Build a grid of timeframe buttons (3 per row)
+        tf_buttons = []
+        row = []
+        for i, tf in enumerate(VALID_TIMEFRAMES):
+            label = f"✅ {tf}" if tf == current_tf else tf
+            row.append(InlineKeyboardButton(label, callback_data=f"set_tf:{tf}"))
+            if len(row) == 3:
+                tf_buttons.append(row)
+                row = []
+        if row:
+            tf_buttons.append(row)
+        tf_buttons.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
+
+        await update.effective_message.reply_text(
+            f"⏱ <b>Select Timeframe</b>\n"
+            f"Current: <b>{current_tf}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(tf_buttons),
+        )
+
+    # ── Timeframe selection ───────────────────────────────────────────────────
+    elif data.startswith("set_tf:"):
+        tf = data.split(":", 1)[1]
+        if tf in VALID_TIMEFRAMES:
+            set_timeframe(tf)
+            await update.effective_message.reply_text(
+                f"✅ Timeframe set to <b>{tf}</b>\n\nType /menu to go back.",
+                parse_mode="HTML",
+            )
+        else:
+            await update.effective_message.reply_text("❌ Unknown timeframe.")
+
+    elif data == "menu":
+        await cmd_menu(update, ctx)
 
 
 # ── Alert formatters ──────────────────────────────────────────────────────────
@@ -307,19 +493,17 @@ def alert_trade_opened(symbol: str, trade) -> None:
         f"✅ <b>Trade Opened — {html.escape(symbol)}</b>\n\n"
         f"Side:        <b>{trade.side.upper()}</b>\n"
         f"Entry:       <b>{trade.entry_price:.6f}</b>\n"
-        f"Stop Loss:   <b>{trade.stop_loss:.6f}</b>\n"
-        f"Take Profit: <b>{trade.take_profit:.6f}</b>\n"
         f"Qty:         <b>{trade.quantity}</b>\n"
-        f"Signal:      <b>{trade.signal_type}</b>"
+        f"Stop Loss:   <b>{trade.stop_loss:.6f}</b>\n"
+        f"Take Profit: <b>{trade.take_profit:.6f}</b>"
     )
 
 
 def alert_trade_closed(trade, price: float, pnl: float, reason: str) -> None:
     emoji = "🟢" if pnl >= 0 else "🔴"
     send_alert(
-        f"{emoji} <b>Trade Closed [{reason}] — {html.escape(trade.symbol)}</b>\n\n"
-        f"Side:   <b>{trade.side.upper()}</b>\n"
-        f"Entry:  {trade.entry_price:.6f}\n"
+        f"{emoji} <b>Trade Closed — {html.escape(trade.symbol)}</b>\n\n"
+        f"Reason: <b>{reason}</b>\n"
         f"Exit:   <b>{price:.6f}</b>\n"
         f"PnL:    <b>${pnl:.4f}</b>"
     )
@@ -327,39 +511,39 @@ def alert_trade_closed(trade, price: float, pnl: float, reason: str) -> None:
 
 def alert_error(context: str, exc: Exception) -> None:
     send_alert(
-        f"⚠️ <b>Bot Error</b>\n\n"
-        f"Where: {html.escape(context)}\n"
-        f"Error: {html.escape(str(exc))}"
+        f"⚠️ <b>Error — {html.escape(context)}</b>\n"
+        f"<code>{html.escape(str(exc))}</code>"
     )
 
 
-# ── Build & run application ───────────────────────────────────────────────────
+# ── App builder ───────────────────────────────────────────────────────────────
 
 def build_app() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler(["start", "menu"], cmd_menu))
-    app.add_handler(CommandHandler("status",     cmd_status))
-    app.add_handler(CommandHandler("toggle",     cmd_toggle))
-    app.add_handler(CommandHandler("balance",    cmd_balance))
-    app.add_handler(CommandHandler("setrisk",    cmd_setrisk))
-    app.add_handler(CommandHandler("pairs",      cmd_pairs))
-    app.add_handler(CommandHandler("addpair",    cmd_addpair))
-    app.add_handler(CommandHandler("removepair", cmd_removepair))
-    app.add_handler(CommandHandler("closeall",   cmd_closeall))
+    app.add_handler(CommandHandler("status",        cmd_status))
+    app.add_handler(CommandHandler("toggle",        cmd_toggle))
+    app.add_handler(CommandHandler("balance",       cmd_balance))
+    app.add_handler(CommandHandler("setrisk",       cmd_setrisk))
+    app.add_handler(CommandHandler("setamount",     cmd_setamount))
+    app.add_handler(CommandHandler("settimeframe",  cmd_settimeframe))
+    app.add_handler(CommandHandler("pairs",         cmd_pairs))
+    app.add_handler(CommandHandler("addpair",       cmd_addpair))
+    app.add_handler(CommandHandler("removepair",    cmd_removepair))
+    app.add_handler(CommandHandler("closeall",      cmd_closeall))
     app.add_handler(CallbackQueryHandler(button_handler))
+    # Free-text handler for amount prompts (must be last)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     return app
 
 
 def run_bot_in_thread(app: Application) -> None:
     """
-    BUG FIX: PTB v21 run_polling() installs OS signal handlers which only
-    work from the main thread — calling it from a daemon thread raises
-    ValueError: signal only works in main thread.
-
-    Fix: call the lower-level initialize/start/start_polling directly
-    without the signal-handler wrapper, then keep the loop alive.
+    PTB v21 run_polling() installs OS signal handlers which only work from the
+    main thread. Fix: call the lower-level initialize/start/start_polling
+    directly without the signal-handler wrapper, then keep the loop alive.
     """
     global _bot_loop
 
@@ -370,7 +554,6 @@ def run_bot_in_thread(app: Application) -> None:
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         logger.info("Telegram bot polling started")
-        # Keep the coroutine alive indefinitely
         while True:
             await asyncio.sleep(3600)
 

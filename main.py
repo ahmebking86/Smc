@@ -6,7 +6,7 @@ import time
 
 import pandas as pd
 
-from config import SCAN_INTERVAL_SECONDS, TIMEFRAME, KLINE_LIMIT
+from config import SCAN_INTERVAL_SECONDS, KLINE_LIMIT
 from database import init_db, get_settings, get_active_pairs
 from health import start_health_server, set_status
 from strategy.smc import generate_signal
@@ -36,10 +36,10 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 
 # ── Single scan cycle ─────────────────────────────────────────────────────────
 
-def scan_pair(symbol: str, risk_percent: float) -> None:
-    logger.debug("Scanning %s", symbol)
+def scan_pair(symbol: str, risk_percent: float, timeframe: str, trade_amount_usdt=None) -> None:
+    logger.debug("Scanning %s  tf=%s", symbol, timeframe)
     try:
-        raw = fetch_ohlcv(symbol, TIMEFRAME, KLINE_LIMIT)
+        raw = fetch_ohlcv(symbol, timeframe, KLINE_LIMIT)
         if not raw or len(raw) < 50:
             logger.warning("%s: not enough candles (%d)", symbol, len(raw) if raw else 0)
             return
@@ -54,7 +54,10 @@ def scan_pair(symbol: str, risk_percent: float) -> None:
         logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
         alert_signal(symbol, signal)
 
-        trade = open_position(symbol, signal, risk_percent)
+        trade = open_position(
+            symbol, signal, risk_percent,
+            trade_amount_usdt=trade_amount_usdt,
+        )
         if trade:
             alert_trade_opened(symbol, trade)
 
@@ -66,11 +69,14 @@ def scan_pair(symbol: str, risk_percent: float) -> None:
 # ── Main trading loop ─────────────────────────────────────────────────────────
 
 def trading_loop() -> None:
-    logger.info("Trading loop started  timeframe=%s  interval=%ds", TIMEFRAME, SCAN_INTERVAL_SECONDS)
+    logger.info("Trading loop started  interval=%ds", SCAN_INTERVAL_SECONDS)
 
     while True:
         try:
             cfg = get_settings()
+
+            # Timeframe is now read dynamically from DB each cycle
+            timeframe = cfg.timeframe or "15m"
 
             # Monitor existing trades for SL/TP hits
             alerts = monitor_open_trades()
@@ -87,12 +93,19 @@ def trading_loop() -> None:
                 "trading_enabled": cfg.trading_enabled,
                 "balance_usdt": round(balance, 2),
                 "active_pairs": get_active_pairs(),
+                "timeframe": timeframe,
+                "trade_amount_usdt": cfg.trade_amount_usdt,
             })
 
             # Only scan for new signals if trading is enabled
             if cfg.trading_enabled:
                 for pair in get_active_pairs():
-                    scan_pair(pair, cfg.risk_percent)
+                    scan_pair(
+                        pair,
+                        cfg.risk_percent,
+                        timeframe,
+                        trade_amount_usdt=cfg.trade_amount_usdt,
+                    )
             else:
                 logger.info("Trading paused — skipping scan")
 

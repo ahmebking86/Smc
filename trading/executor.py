@@ -1,4 +1,4 @@
-"""trading/executor.py — Order execution via ccxt (Bitget futures)."""
+"""trading/executor.py — Order execution via ccxt (Bitget spot)."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ from database import (
     close_trade, get_open_trades, db_log,
 )
 from strategy.smc import TradeSignal
-from trading.risk import position_size
+from trading.risk import position_size, fixed_position_size
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,17 @@ def open_position(
     symbol: str,
     signal: TradeSignal,
     risk_percent: float,
+    trade_amount_usdt: Optional[float] = None,
 ) -> Optional[Trade]:
-    """Execute a market order and save to DB. Returns Trade or None on failure."""
+    """
+    Execute a spot market buy and save to DB.
+
+    Sizing priority:
+      1. trade_amount_usdt — fixed USDT amount (set via Telegram button)
+      2. risk_percent      — % of balance risked on SL distance (legacy default)
+
+    Returns Trade on success, None on failure or skip.
+    """
     # Avoid duplicate positions on same symbol
     existing = get_open_trade_for_symbol(symbol)
     if existing:
@@ -76,10 +85,18 @@ def open_position(
     ex = get_exchange()
 
     try:
-        balance = fetch_usdt_balance()
-        qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
+        if trade_amount_usdt and trade_amount_usdt > 0:
+            # Fixed USDT amount mode
+            qty = fixed_position_size(trade_amount_usdt, signal.entry)
+            sizing_note = f"fixed ${trade_amount_usdt} USDT"
+        else:
+            # Risk-percent mode
+            balance = fetch_usdt_balance()
+            qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
+            sizing_note = f"risk {risk_percent}%"
+
         if qty <= 0:
-            logger.warning("Position size is zero for %s — skipping", symbol)
+            logger.warning("Position size is zero for %s (%s) — skipping", symbol, sizing_note)
             return None
 
         order = ex.create_market_order(symbol, "buy", qty)
@@ -98,10 +115,10 @@ def open_position(
         )
         saved = save_trade(trade)
         logger.info(
-            "Opened %s %s @ %.6f  qty=%.4f  SL=%.6f  TP=%.6f",
-            signal.side, symbol, actual_price, qty, signal.stop_loss, signal.take_profit,
+            "Opened %s %s @ %.6f  qty=%.4f  SL=%.6f  TP=%.6f  [%s]",
+            signal.side, symbol, actual_price, qty, signal.stop_loss, signal.take_profit, sizing_note,
         )
-        db_log("INFO", f"Opened {signal.side} {symbol} @ {actual_price:.6f} [{signal.signal_type}]")
+        db_log("INFO", f"Opened {signal.side} {symbol} @ {actual_price:.6f} [{signal.signal_type}] ({sizing_note})")
         return saved
 
     except Exception as exc:

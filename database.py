@@ -9,7 +9,6 @@ from sqlalchemy import (
     Boolean, DateTime, Float, Integer, String, Text,
     create_engine, select, update, func
 )
-# BUG FIX: removed unused 'Session' import
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from config import DATABASE_URL
@@ -59,7 +58,10 @@ class BotSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     trading_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     risk_percent: Mapped[float] = mapped_column(Float, default=1.0)
-    active_pairs: Mapped[str] = mapped_column(Text, default="BTC/USDT:USDT,ETH/USDT:USDT")
+    active_pairs: Mapped[str] = mapped_column(Text, default="BTC/USDT,ETH/USDT")
+    # ── New: fixed trade amount (USDT) and dynamic timeframe ──────────────────
+    trade_amount_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    timeframe: Mapped[str] = mapped_column(String(10), default="15m")
 
 
 class BotLog(Base):
@@ -80,14 +82,24 @@ def init_db() -> None:
     with SessionLocal() as s:
         settings = s.get(BotSettings, 1)
         if settings is None:
-            from config import DEFAULT_RISK_PERCENT, DEFAULT_PAIRS
+            from config import DEFAULT_RISK_PERCENT, DEFAULT_PAIRS, TIMEFRAME
             s.add(BotSettings(
                 id=1,
                 trading_enabled=True,
                 risk_percent=DEFAULT_RISK_PERCENT,
                 active_pairs=",".join(DEFAULT_PAIRS),
+                trade_amount_usdt=None,
+                timeframe=TIMEFRAME,
             ))
             s.commit()
+        else:
+            # Migrate existing rows that may lack the new columns
+            changed = False
+            if not hasattr(settings, "timeframe") or settings.timeframe is None:
+                settings.timeframe = "15m"
+                changed = True
+            if changed:
+                s.commit()
     logger.info("Database initialised")
 
 
@@ -107,6 +119,20 @@ def set_trading_enabled(enabled: bool) -> None:
 def set_risk_percent(pct: float) -> None:
     with SessionLocal() as s:
         s.execute(update(BotSettings).where(BotSettings.id == 1).values(risk_percent=pct))
+        s.commit()
+
+
+def set_trade_amount(amount: Optional[float]) -> None:
+    """Set fixed USDT amount per trade. Pass None to revert to risk-% sizing."""
+    with SessionLocal() as s:
+        s.execute(update(BotSettings).where(BotSettings.id == 1).values(trade_amount_usdt=amount))
+        s.commit()
+
+
+def set_timeframe(tf: str) -> None:
+    """Set the trading timeframe (e.g. '1m', '5m', '15m', '1h', '4h', '1d')."""
+    with SessionLocal() as s:
+        s.execute(update(BotSettings).where(BotSettings.id == 1).values(timeframe=tf))
         s.commit()
 
 
