@@ -108,7 +108,10 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton("⚡ Toggle",    callback_data="toggle"),
         ],
         [
+            InlineKeyboardButton("💰 Balance",   callback_data="balance"),
             InlineKeyboardButton("🔗 Pairs",     callback_data="pairs"),
+        ],
+        [
             InlineKeyboardButton("🚨 Close ALL", callback_data="closeall"),
         ],
     ])
@@ -231,6 +234,24 @@ async def cmd_removepair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+# ── /balance ──────────────────────────────────────────────────────────────────
+
+@admin_only
+async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        from trading.executor import fetch_usdt_balance
+        balance = fetch_usdt_balance()
+        await update.effective_message.reply_text(
+            f"💰 <b>Account Balance</b>\n\n"
+            f"USDT Available: <b>${balance:.2f}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Error fetching balance: {html.escape(str(exc))}", parse_mode="HTML"
+        )
+
+
 # ── /closeall ─────────────────────────────────────────────────────────────────
 
 @admin_only
@@ -259,6 +280,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await cmd_status(update, ctx)
     elif data == "toggle":
         await cmd_toggle(update, ctx)
+    elif data == "balance":
+        await cmd_balance(update, ctx)
     elif data == "pairs":
         await cmd_pairs(update, ctx)
     elif data == "closeall":
@@ -318,6 +341,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler(["start", "menu"], cmd_menu))
     app.add_handler(CommandHandler("status",     cmd_status))
     app.add_handler(CommandHandler("toggle",     cmd_toggle))
+    app.add_handler(CommandHandler("balance",    cmd_balance))
     app.add_handler(CommandHandler("setrisk",    cmd_setrisk))
     app.add_handler(CommandHandler("pairs",      cmd_pairs))
     app.add_handler(CommandHandler("addpair",    cmd_addpair))
