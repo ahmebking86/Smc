@@ -24,6 +24,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
+# ── Signal cooldown ───────────────────────────────────────────────────────────
+# BUG FIX: without a cooldown, every scan cycle that sees the same candle
+# pattern fires a duplicate alert.  5-minute minimum gap per symbol.
+SIGNAL_COOLDOWN_SECONDS = 300
+_last_signal_time: dict[str, float] = {}
+
+
+def _is_on_cooldown(symbol: str) -> bool:
+    last = _last_signal_time.get(symbol, 0.0)
+    return (time.monotonic() - last) < SIGNAL_COOLDOWN_SECONDS
+
+
+def _mark_signal_sent(symbol: str) -> None:
+    _last_signal_time[symbol] = time.monotonic()
+
 
 # ── OHLCV → DataFrame ─────────────────────────────────────────────────────────
 
@@ -43,6 +58,12 @@ def scan_pair(
     trade_amount_usdt=None,
 ) -> None:
     logger.debug("Scanning %s  tf=%s", symbol, timeframe)
+
+    # Skip sending another alert if one just fired for this symbol
+    if _is_on_cooldown(symbol):
+        logger.debug("%s: on signal cooldown, skipping", symbol)
+        return
+
     try:
         raw = fetch_ohlcv(symbol, timeframe, KLINE_LIMIT)
         if not raw or len(raw) < 50:
@@ -56,23 +77,21 @@ def scan_pair(
             logger.debug("%s: no signal", symbol)
             return
 
-        # generate_signal() only returns long signals (spot-only bot).
-        # Guard here in case the function is called from other code paths.
+        # Spot only — guard against any non-long signal
         if signal.side != "long":
             logger.debug("%s: non-long signal skipped (spot only)", symbol)
             return
 
         logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
 
-        # BUG FIX: alert AFTER confirming the trade will be attempted,
-        # not before. This prevents confusing "SHORT signal!" alerts with
-        # no corresponding trade execution.
+        # Attempt to open the trade FIRST
         trade = open_position(
             symbol, signal, risk_percent,
             trade_amount_usdt=trade_amount_usdt,
         )
 
-        # Only alert if we actually opened (or attempted to open) a trade
+        # Only send alert after trade attempt and mark cooldown
+        _mark_signal_sent(symbol)
         alert_signal(symbol, signal)
         if trade:
             alert_trade_opened(symbol, trade)

@@ -173,7 +173,16 @@ def set_active_pairs(pairs: list[str]) -> None:
 
 def get_active_pairs() -> list[str]:
     cfg = get_settings()
-    return [p.strip() for p in cfg.active_pairs.split(",") if p.strip()]
+    pairs = []
+    for p in cfg.active_pairs.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        # BUG FIX: strip ccxt perpetual suffix (e.g. BTC/USDT:USDT → BTC/USDT)
+        if ":" in p:
+            p = p.split(":")[0]
+        pairs.append(p.upper())
+    return pairs
 
 
 # ── Trade helpers ─────────────────────────────────────────────────────────────

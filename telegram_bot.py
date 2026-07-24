@@ -27,11 +27,9 @@ logger = logging.getLogger(__name__)
 _bot_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # ── Per-user conversation state ───────────────────────────────────────────────
-# Tracks what we're waiting for from the admin (e.g. "amount")
 _waiting_for: dict[int, str] = {}
 
 # ── Singleton bot for sending alerts ─────────────────────────────────────────
-
 _bot: Optional[Bot] = None
 
 
@@ -76,26 +74,53 @@ def admin_only(func):
     return wrapper
 
 
+# ── Symbol normaliser ─────────────────────────────────────────────────────────
+
+def normalize_symbol(raw: str) -> str:
+    """
+    BUG FIX: ccxt Bitget returns spot symbols in perpetual format
+    (e.g. BTC/USDT:USDT) when load_markets() fetches the unified market list.
+    Strip the settlement suffix so the bot only stores/uses BTC/USDT style.
+    """
+    s = raw.strip().upper()
+    if ":" in s:
+        s = s.split(":")[0]   # "BTC/USDT:USDT" → "BTC/USDT"
+    return s
+
+
 # ── Helper: build main menu keyboard ─────────────────────────────────────────
 
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Status",      callback_data="status"),
-            InlineKeyboardButton("⚡ Toggle",      callback_data="toggle"),
+            InlineKeyboardButton("📊 Status",       callback_data="status"),
+            InlineKeyboardButton("⚡ Toggle",       callback_data="toggle"),
         ],
         [
-            InlineKeyboardButton("💵 Set Amount",  callback_data="set_amount"),
-            InlineKeyboardButton("⏱ Timeframe",   callback_data="set_tf_menu"),
+            InlineKeyboardButton("💵 Set Amount",   callback_data="set_amount"),
+            InlineKeyboardButton("⏱ Timeframe",    callback_data="set_tf_menu"),
         ],
         [
-            InlineKeyboardButton("💰 Balance",     callback_data="balance"),
-            InlineKeyboardButton("🔗 Pairs",       callback_data="pairs"),
+            InlineKeyboardButton("💰 Balance",      callback_data="balance"),
+            InlineKeyboardButton("📋 My Pairs",     callback_data="pairs"),
         ],
         [
-            InlineKeyboardButton("🚨 Close ALL",   callback_data="closeall"),
+            InlineKeyboardButton("🚨 Close ALL",    callback_data="closeall"),
         ],
     ])
+
+
+# ── Helper: build pairs keyboard (shows each pair with a ❌ remove button) ────
+
+def _pairs_keyboard(pairs: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for p in pairs:
+        rows.append([
+            InlineKeyboardButton(f"✅ {p}", callback_data="noop"),
+            InlineKeyboardButton("❌ Remove", callback_data=f"rm_pair:{p}"),
+        ])
+    rows.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")])
+    return InlineKeyboardMarkup(rows)
 
 
 # ── /start  /menu ─────────────────────────────────────────────────────────────
@@ -120,15 +145,18 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         amount_str = f"{cfg.risk_percent}% risk"
 
+    pairs = get_active_pairs()
+    pairs_str = ", ".join(pairs) if pairs else "None"
+
     text = (
         f"🤖 <b>SMC Bitget Bot — Spot Only</b>\n\n"
-        f"Status:      <b>{mode}</b>\n"
-        f"Balance:     <b>{balance_str} USDT</b>\n"
-        f"Amount/Trade:<b> {amount_str}</b>\n"
-        f"Timeframe:   <b>{cfg.timeframe or '15m'}</b>\n"
-        f"Pairs:       <b>{html.escape(cfg.active_pairs)}</b>\n\n"
-        f"Open trades: <b>{len(trades)}</b>\n"
-        f"Today PnL:   <b>${stats['pnl']:.2f}</b> ({stats['count']} trades)\n"
+        f"Status:       <b>{mode}</b>\n"
+        f"Balance:      <b>{balance_str} USDT</b>\n"
+        f"Amount/Trade: <b>{amount_str}</b>\n"
+        f"Timeframe:    <b>{cfg.timeframe or '15m'}</b>\n"
+        f"Pairs:        <b>{html.escape(pairs_str)}</b>\n\n"
+        f"Open trades:  <b>{len(trades)}</b>\n"
+        f"Today PnL:    <b>${stats['pnl']:.2f}</b> ({stats['count']} trades)\n"
     )
 
     await update.effective_message.reply_text(
@@ -146,8 +174,10 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         lines = ["📈 <b>Open Trades</b>\n"]
         for t in trades:
+            # Normalize display symbol in case old DB rows have the :USDT suffix
+            disp = normalize_symbol(t.symbol)
             lines.append(
-                f"• <b>{html.escape(t.symbol)}</b> [{t.side.upper()}]\n"
+                f"• <b>{html.escape(disp)}</b> [{t.side.upper()}]\n"
                 f"  Entry: {t.entry_price:.6f}\n"
                 f"  SL: <b>{t.stop_loss:.6f}</b>  TP: <b>{t.take_profit:.6f}</b>\n"
                 f"  Signal: {t.signal_type or '-'}\n"
@@ -205,8 +235,8 @@ async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_setamount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Set a fixed USDT amount per trade.
-    Usage:  /setamount 100      → trade $100 USDT each signal
-            /setamount 0        → revert to risk-% sizing
+      /setamount 100   → $100 USDT per trade
+      /setamount 0     → revert to risk-% sizing
     """
     cfg = get_settings()
 
@@ -283,46 +313,83 @@ async def cmd_settimeframe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 @admin_only
 async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pairs = get_active_pairs()
+    if not pairs:
+        await update.effective_message.reply_text(
+            "📋 <b>Active Pairs</b>\n\nNo pairs added yet.\n\n"
+            "Add one: <code>/addpair BTC/USDT</code>",
+            parse_mode="HTML",
+        )
+        return
+
     await update.effective_message.reply_text(
-        f"🔗 <b>Active pairs:</b>\n{chr(10).join(pairs)}\n\n"
-        f"Add:    <code>/addpair BTC/USDT</code>\n"
-        f"Remove: <code>/removepair ETH/USDT</code>",
+        f"📋 <b>Active Pairs</b> ({len(pairs)} total)\n\n"
+        f"Tap ❌ to remove a pair.\n"
+        f"Add new: <code>/addpair SOL/USDT</code>",
         parse_mode="HTML",
+        reply_markup=_pairs_keyboard(pairs),
     )
 
+
+# ── /addpair ──────────────────────────────────────────────────────────────────
 
 @admin_only
 async def cmd_addpair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
-        await update.effective_message.reply_text("Usage: /addpair BTC/USDT")
+        await update.effective_message.reply_text(
+            "Usage: <code>/addpair BTC/USDT</code>", parse_mode="HTML"
+        )
         return
-    symbol = ctx.args[0].upper()
+
+    # BUG FIX: normalize symbol to strip :USDT perp suffix before storing
+    symbol = normalize_symbol(ctx.args[0])
+
+    if "/" not in symbol:
+        await update.effective_message.reply_text(
+            "❌ Invalid format. Use <code>BASE/QUOTE</code> e.g. <code>BTC/USDT</code>",
+            parse_mode="HTML",
+        )
+        return
+
     pairs = get_active_pairs()
     if symbol not in pairs:
         pairs.append(symbol)
         set_active_pairs(pairs)
         await update.effective_message.reply_text(
-            f"✅ Added <b>{html.escape(symbol)}</b>", parse_mode="HTML"
+            f"✅ Added <b>{html.escape(symbol)}</b>\n\n"
+            f"Active pairs: <b>{', '.join(pairs)}</b>",
+            parse_mode="HTML",
         )
     else:
-        await update.effective_message.reply_text(f"Already in list: {html.escape(symbol)}")
+        await update.effective_message.reply_text(
+            f"⚠️ <b>{html.escape(symbol)}</b> is already in the list.", parse_mode="HTML"
+        )
 
+
+# ── /removepair ───────────────────────────────────────────────────────────────
 
 @admin_only
 async def cmd_removepair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ctx.args:
-        await update.effective_message.reply_text("Usage: /removepair BTC/USDT")
+        await update.effective_message.reply_text(
+            "Usage: <code>/removepair ETH/USDT</code>", parse_mode="HTML"
+        )
         return
-    symbol = ctx.args[0].upper()
+
+    symbol = normalize_symbol(ctx.args[0])
     pairs = get_active_pairs()
     if symbol in pairs:
         pairs.remove(symbol)
         set_active_pairs(pairs)
+        remaining = ", ".join(pairs) if pairs else "None"
         await update.effective_message.reply_text(
-            f"✅ Removed <b>{html.escape(symbol)}</b>", parse_mode="HTML"
+            f"✅ Removed <b>{html.escape(symbol)}</b>\n\n"
+            f"Remaining: <b>{html.escape(remaining)}</b>",
+            parse_mode="HTML",
         )
     else:
-        await update.effective_message.reply_text(f"Not in list: {html.escape(symbol)}")
+        await update.effective_message.reply_text(
+            f"⚠️ <b>{html.escape(symbol)}</b> not found in active pairs.", parse_mode="HTML"
+        )
 
 
 # ── /balance ──────────────────────────────────────────────────────────────────
@@ -358,7 +425,7 @@ async def cmd_closeall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-# ── Free-text message handler (for amount input after button prompt) ───────────
+# ── Free-text handler (amount input after button prompt) ──────────────────────
 
 @admin_only
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -366,23 +433,22 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     state = _waiting_for.get(user_id)
 
     if state == "amount":
-        text = (update.effective_message.text or "").strip()
+        raw = (update.effective_message.text or "").strip()
         try:
-            val = float(text)
+            val = float(raw)
             if val < 0:
                 raise ValueError
             if val == 0:
                 set_trade_amount(None)
                 cfg = get_settings()
                 await update.effective_message.reply_text(
-                    f"✅ Reverted to risk-% sizing (<b>{cfg.risk_percent}%</b>)",
+                    f"✅ Reverted to risk-% sizing (<b>{cfg.risk_percent}%</b>)\n\nType /menu to go back.",
                     parse_mode="HTML",
                 )
             else:
                 set_trade_amount(val)
                 await update.effective_message.reply_text(
-                    f"✅ Trade amount set to <b>${val:.2f} USDT</b> per signal\n\n"
-                    f"Type /menu to go back.",
+                    f"✅ Trade amount set to <b>${val:.2f} USDT</b> per signal\n\nType /menu to go back.",
                     parse_mode="HTML",
                 )
         except ValueError:
@@ -404,7 +470,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     await q.answer()
     data = q.data
 
-    if data == "status":
+    if data == "noop":
+        return  # Pair label button — do nothing
+
+    elif data == "status":
         await cmd_status(update, ctx)
 
     elif data == "toggle":
@@ -419,10 +488,47 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     elif data == "closeall":
         await cmd_closeall(update, ctx)
 
+    elif data == "menu":
+        await cmd_menu(update, ctx)
+
+    # ── Inline pair removal (❌ button next to each pair) ────────────────────
+    elif data.startswith("rm_pair:"):
+        symbol = data.split(":", 1)[1]
+        pairs = get_active_pairs()
+        if symbol in pairs:
+            pairs.remove(symbol)
+            set_active_pairs(pairs)
+            if pairs:
+                await update.effective_message.edit_text(
+                    f"✅ Removed <b>{html.escape(symbol)}</b>\n\n"
+                    f"📋 <b>Active Pairs</b> ({len(pairs)} total)\n\n"
+                    f"Tap ❌ to remove a pair.\n"
+                    f"Add new: <code>/addpair SOL/USDT</code>",
+                    parse_mode="HTML",
+                    reply_markup=_pairs_keyboard(pairs),
+                )
+            else:
+                await update.effective_message.edit_text(
+                    f"✅ Removed <b>{html.escape(symbol)}</b>\n\n"
+                    f"📋 No pairs left. Add one: <code>/addpair BTC/USDT</code>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")
+                    ]]),
+                )
+        else:
+            await update.effective_message.reply_text(
+                f"⚠️ {html.escape(symbol)} not found (already removed?)."
+            )
+
     # ── Set Amount (prompt user to type the value) ────────────────────────────
     elif data == "set_amount":
         cfg = get_settings()
-        current = f"${cfg.trade_amount_usdt:.2f} USDT" if cfg.trade_amount_usdt else f"{cfg.risk_percent}% risk"
+        current = (
+            f"${cfg.trade_amount_usdt:.2f} USDT"
+            if cfg.trade_amount_usdt
+            else f"{cfg.risk_percent}% risk"
+        )
         user_id = update.effective_user.id
         _waiting_for[user_id] = "amount"
         await update.effective_message.reply_text(
@@ -438,9 +544,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     elif data == "set_tf_menu":
         cfg = get_settings()
         current_tf = cfg.timeframe or "15m"
-        # Build a grid of timeframe buttons (3 per row)
-        tf_buttons = []
-        row = []
+        tf_buttons: list[list[InlineKeyboardButton]] = []
+        row: list[InlineKeyboardButton] = []
         for i, tf in enumerate(VALID_TIMEFRAMES):
             label = f"✅ {tf}" if tf == current_tf else tf
             row.append(InlineKeyboardButton(label, callback_data=f"set_tf:{tf}"))
@@ -470,15 +575,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         else:
             await update.effective_message.reply_text("❌ Unknown timeframe.")
 
-    elif data == "menu":
-        await cmd_menu(update, ctx)
+    else:
+        logger.warning("Unknown callback_data: %s", data)
 
 
 # ── Alert formatters ──────────────────────────────────────────────────────────
 
 def alert_signal(symbol: str, signal) -> None:
+    # BUG FIX: normalize symbol in alert so display is always BTC/USDT not BTC/USDT:USDT
+    disp = normalize_symbol(symbol)
     send_alert(
-        f"📡 <b>SMC Signal — {html.escape(symbol)}</b>\n\n"
+        f"📡 <b>SMC Signal — {html.escape(disp)}</b>\n\n"
         f"Side:        <b>{signal.side.upper()}</b>\n"
         f"Entry:       <b>{signal.entry:.6f}</b>\n"
         f"Stop Loss:   <b>{signal.stop_loss:.6f}</b>\n"
@@ -489,30 +596,33 @@ def alert_signal(symbol: str, signal) -> None:
 
 
 def alert_trade_opened(symbol: str, trade) -> None:
+    disp = normalize_symbol(symbol)
     send_alert(
-        f"✅ <b>Trade Opened — {html.escape(symbol)}</b>\n\n"
-        f"Side:        <b>{trade.side.upper()}</b>\n"
-        f"Entry:       <b>{trade.entry_price:.6f}</b>\n"
-        f"Qty:         <b>{trade.quantity}</b>\n"
-        f"Stop Loss:   <b>{trade.stop_loss:.6f}</b>\n"
-        f"Take Profit: <b>{trade.take_profit:.6f}</b>"
+        f"✅ <b>Trade Opened — {html.escape(disp)}</b>\n\n"
+        f"Side:     <b>{trade.side.upper()}</b>\n"
+        f"Entry:    <b>{trade.entry_price:.6f}</b>\n"
+        f"Qty:      <b>{trade.quantity:.6f}</b>\n"
+        f"SL:       <b>{trade.stop_loss:.6f}</b>\n"
+        f"TP:       <b>{trade.take_profit:.6f}</b>\n"
+        f"Order ID: <code>{trade.bitget_order_id or 'N/A'}</code>"
     )
 
 
 def alert_trade_closed(trade, price: float, pnl: float, reason: str) -> None:
+    disp = normalize_symbol(trade.symbol)
     emoji = "🟢" if pnl >= 0 else "🔴"
     send_alert(
-        f"{emoji} <b>Trade Closed — {html.escape(trade.symbol)}</b>\n\n"
-        f"Reason: <b>{reason}</b>\n"
-        f"Exit:   <b>{price:.6f}</b>\n"
-        f"PnL:    <b>${pnl:.4f}</b>"
+        f"{emoji} <b>Trade Closed — {html.escape(disp)}</b>\n\n"
+        f"Reason:    <b>{reason}</b>\n"
+        f"Exit:      <b>{price:.6f}</b>\n"
+        f"PnL:       <b>{'+' if pnl >= 0 else ''}{pnl:.4f} USDT</b>"
     )
 
 
 def alert_error(context: str, exc: Exception) -> None:
     send_alert(
-        f"⚠️ <b>Error — {html.escape(context)}</b>\n"
-        f"<code>{html.escape(str(exc))}</code>"
+        f"⚠️ <b>Error in {html.escape(context)}</b>\n\n"
+        f"<code>{html.escape(str(exc))[:300]}</code>"
     )
 
 
