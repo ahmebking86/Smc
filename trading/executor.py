@@ -35,8 +35,7 @@ _exchange: Optional[ccxt.bitget] = None
 def get_exchange() -> ccxt.bitget:
     """
     Return (or create) the exchange singleton.
-    BUG FIX: resets the singleton if a NetworkError is raised so the next
-    call will reconnect instead of reusing a broken connection object.
+    Resets the singleton on NetworkError so the next call reconnects.
     """
     global _exchange
     if _exchange is None:
@@ -74,6 +73,46 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int) -> list:
         raise
 
 
+# ── Top USDT pairs by 24h volume ──────────────────────────────────────────────
+
+def fetch_top_usdt_pairs(n: int = 20) -> list[str]:
+    """
+    Return the top-N spot USDT pairs from Bitget ranked by 24-hour quote volume.
+    Filters out stablecoins (USDT/USDC/BUSD/DAI base) and very new/illiquid pairs.
+    Always returns normalised BASE/USDT symbols.
+
+    BUG NOTE: ccxt tickers for Bitget spot carry the settlement suffix
+    (BTC/USDT:USDT) in perpetual market mode. We load spot-only markets first
+    via load_markets() with defaultType=spot and strip any stray suffix.
+    """
+    STABLECOIN_BASES = {"USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDD", "USDP"}
+    n = max(1, min(n, 50))   # hard cap at 50
+
+    ex = get_exchange()
+    try:
+        tickers = ex.fetch_tickers()
+    except ccxt.NetworkError:
+        _reset_exchange()
+        raise
+
+    candidates: list[tuple[float, str]] = []
+    for market_id, t in tickers.items():
+        # Normalise symbol: strip perpetual suffix
+        sym = market_id.split(":")[0].upper()
+        if not sym.endswith("/USDT"):
+            continue
+        base = sym.split("/")[0]
+        if base in STABLECOIN_BASES or base == "USDT":
+            continue
+        quote_vol = float(t.get("quoteVolume") or 0)
+        if quote_vol <= 0:
+            continue
+        candidates.append((quote_vol, sym))
+
+    candidates.sort(reverse=True)
+    return [sym for _, sym in candidates[:n]]
+
+
 # ── Open position ─────────────────────────────────────────────────────────────
 
 def open_position(
@@ -89,18 +128,13 @@ def open_position(
       1. trade_amount_usdt — fixed USDT amount (set via Telegram button)
       2. risk_percent      — % of balance risked on SL distance (default)
 
-    BUG FIX: always fetches balance and checks sufficiency, even in
-    fixed-amount mode, and sends a Telegram-visible warning if insufficient.
-
-    Returns Trade on success, None on failure / skip.
+    Always fetches balance first and returns None with a warning if insufficient.
     """
     existing = get_open_trade_for_symbol(symbol)
     if existing:
         logger.info("Already have open trade for %s — skipping", symbol)
         return None
 
-    # Spot only: skip short signals (generate_signal now never emits them,
-    # but guard here in case the function is called directly).
     if signal.side != "long":
         logger.info("Skipping non-long signal for %s (spot only)", symbol)
         return None
@@ -108,11 +142,9 @@ def open_position(
     ex = get_exchange()
 
     try:
-        # Always fetch balance first — needed for both sizing modes
         balance = fetch_usdt_balance()
 
         if trade_amount_usdt and trade_amount_usdt > 0:
-            # Fixed USDT amount mode
             if balance < trade_amount_usdt:
                 msg = (
                     f"Insufficient balance for {symbol}: "
@@ -124,7 +156,6 @@ def open_position(
             qty = fixed_position_size(trade_amount_usdt, signal.entry)
             sizing_note = f"fixed ${trade_amount_usdt:.2f} USDT"
         else:
-            # Risk-percent mode
             qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
             sizing_note = f"risk {risk_percent}%"
 
@@ -229,7 +260,7 @@ def _calc_pnl(trade: Trade, exit_price: float) -> float:
     return (exit_price - trade.entry_price) * trade.quantity
 
 
-# ── Close all (emergency) ────────────────────────────────────────────────────
+# ── Close all (emergency) ─────────────────────────────────────────────────────
 
 def close_all_positions() -> int:
     """Force-close every open trade. Returns count closed."""

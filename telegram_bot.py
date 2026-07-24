@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 import threading
 from typing import Optional
 
@@ -77,15 +78,62 @@ def admin_only(func):
 # ── Symbol normaliser ─────────────────────────────────────────────────────────
 
 def normalize_symbol(raw: str) -> str:
-    """
-    BUG FIX: ccxt Bitget returns spot symbols in perpetual format
-    (e.g. BTC/USDT:USDT) when load_markets() fetches the unified market list.
-    Strip the settlement suffix so the bot only stores/uses BTC/USDT style.
-    """
+    """Strip ccxt perpetual suffix: BTC/USDT:USDT → BTC/USDT."""
     s = raw.strip().upper()
     if ":" in s:
-        s = s.split(":")[0]   # "BTC/USDT:USDT" → "BTC/USDT"
+        s = s.split(":")[0]
     return s
+
+
+# ── Paginated pairs keyboard ──────────────────────────────────────────────────
+PAIRS_PAGE_SIZE = 8   # pairs per page
+
+
+def _pairs_keyboard(pairs: list[str], page: int = 0) -> InlineKeyboardMarkup:
+    """
+    Paginated inline keyboard for active pairs.
+    Each pair row: [✅ SYMBOL]  [❌ Remove]
+    Bottom row:    [◀ Prev]  [Page N/M]  [Next ▶]  + [🔙 Menu]
+    """
+    total_pages = max(1, math.ceil(len(pairs) / PAIRS_PAGE_SIZE))
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PAIRS_PAGE_SIZE
+    page_pairs = pairs[start: start + PAIRS_PAGE_SIZE]
+
+    rows = []
+    for p in page_pairs:
+        rows.append([
+            InlineKeyboardButton(f"✅ {p}", callback_data="noop"),
+            InlineKeyboardButton("❌ Remove", callback_data=f"rm_pair:{p}:{page}"),
+        ])
+
+    # Pagination row
+    nav: list[InlineKeyboardButton] = []
+    if total_pages > 1:
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"pairs_pg:{page-1}"))
+        nav.append(InlineKeyboardButton(
+            f"{page + 1}/{total_pages}", callback_data="noop"
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("Next ▶", callback_data=f"pairs_pg:{page+1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _pairs_message(pairs: list[str], page: int = 0) -> str:
+    total_pages = max(1, math.ceil(len(pairs) / PAIRS_PAGE_SIZE))
+    return (
+        f"📋 <b>Active Pairs</b> — {len(pairs)} total"
+        + (f" (page {page+1}/{total_pages})" if total_pages > 1 else "")
+        + "\n\nTap ❌ to remove a pair.\n"
+        + "Add new: <code>/addpair SOL/USDT</code>\n"
+        + "Load top: <code>/loadtop 20</code>"
+    )
 
 
 # ── Helper: build main menu keyboard ─────────────────────────────────────────
@@ -93,34 +141,24 @@ def normalize_symbol(raw: str) -> str:
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Status",       callback_data="status"),
-            InlineKeyboardButton("⚡ Toggle",       callback_data="toggle"),
+            InlineKeyboardButton("📊 Status",        callback_data="status"),
+            InlineKeyboardButton("⚡ Toggle",        callback_data="toggle"),
         ],
         [
-            InlineKeyboardButton("💵 Set Amount",   callback_data="set_amount"),
-            InlineKeyboardButton("⏱ Timeframe",    callback_data="set_tf_menu"),
+            InlineKeyboardButton("💵 Set Amount",    callback_data="set_amount"),
+            InlineKeyboardButton("⏱ Timeframe",     callback_data="set_tf_menu"),
         ],
         [
-            InlineKeyboardButton("💰 Balance",      callback_data="balance"),
-            InlineKeyboardButton("📋 My Pairs",     callback_data="pairs"),
+            InlineKeyboardButton("💰 Balance",       callback_data="balance"),
+            InlineKeyboardButton("📋 My Pairs",      callback_data="pairs"),
         ],
         [
-            InlineKeyboardButton("🚨 Close ALL",    callback_data="closeall"),
+            InlineKeyboardButton("🌐 Load Top Pairs", callback_data="load_top_menu"),
+        ],
+        [
+            InlineKeyboardButton("🚨 Close ALL",     callback_data="closeall"),
         ],
     ])
-
-
-# ── Helper: build pairs keyboard (shows each pair with a ❌ remove button) ────
-
-def _pairs_keyboard(pairs: list[str]) -> InlineKeyboardMarkup:
-    rows = []
-    for p in pairs:
-        rows.append([
-            InlineKeyboardButton(f"✅ {p}", callback_data="noop"),
-            InlineKeyboardButton("❌ Remove", callback_data=f"rm_pair:{p}"),
-        ])
-    rows.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")])
-    return InlineKeyboardMarkup(rows)
 
 
 # ── /start  /menu ─────────────────────────────────────────────────────────────
@@ -139,14 +177,14 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         balance_str = "N/A"
 
-    # Amount display
-    if cfg.trade_amount_usdt and cfg.trade_amount_usdt > 0:
-        amount_str = f"${cfg.trade_amount_usdt:.2f} USDT (fixed)"
-    else:
-        amount_str = f"{cfg.risk_percent}% risk"
+    amount_str = (
+        f"${cfg.trade_amount_usdt:.2f} USDT (fixed)"
+        if cfg.trade_amount_usdt and cfg.trade_amount_usdt > 0
+        else f"{cfg.risk_percent}% risk"
+    )
 
     pairs = get_active_pairs()
-    pairs_str = ", ".join(pairs) if pairs else "None"
+    pairs_str = f"{len(pairs)} pairs" if len(pairs) > 5 else ", ".join(pairs) if pairs else "None"
 
     text = (
         f"🤖 <b>SMC Bitget Bot — Spot Only</b>\n\n"
@@ -174,7 +212,6 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         lines = ["📈 <b>Open Trades</b>\n"]
         for t in trades:
-            # Normalize display symbol in case old DB rows have the :USDT suffix
             disp = normalize_symbol(t.symbol)
             lines.append(
                 f"• <b>{html.escape(disp)}</b> [{t.side.upper()}]\n"
@@ -205,7 +242,6 @@ async def cmd_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 @admin_only
 async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = get_settings()
-
     if not ctx.args:
         await update.effective_message.reply_text(
             f"💰 Current risk: <b>{cfg.risk_percent}%</b>\n\n"
@@ -213,7 +249,6 @@ async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode="HTML",
         )
         return
-
     try:
         val = float(ctx.args[0])
         if not 0.1 <= val <= 10:
@@ -233,25 +268,17 @@ async def cmd_setrisk(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 @admin_only
 async def cmd_setamount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Set a fixed USDT amount per trade.
-      /setamount 100   → $100 USDT per trade
-      /setamount 0     → revert to risk-% sizing
-    """
     cfg = get_settings()
-
     if not ctx.args:
         current = f"${cfg.trade_amount_usdt:.2f} USDT" if cfg.trade_amount_usdt else f"{cfg.risk_percent}% risk"
         await update.effective_message.reply_text(
             f"💵 <b>Trade Amount</b>\n"
             f"Current: <b>{current}</b>\n\n"
-            f"Set fixed USDT per trade:\n"
             f"  <code>/setamount 100</code>  → $100 per trade\n"
             f"  <code>/setamount 0</code>    → revert to risk-% sizing",
             parse_mode="HTML",
         )
         return
-
     try:
         val = float(ctx.args[0])
         if val < 0:
@@ -280,9 +307,7 @@ VALID_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h
 
 @admin_only
 async def cmd_settimeframe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Usage: /settimeframe 15m"""
     cfg = get_settings()
-
     if not ctx.args:
         opts = "  ".join(f"<code>{tf}</code>" for tf in VALID_TIMEFRAMES)
         await update.effective_message.reply_text(
@@ -293,15 +318,12 @@ async def cmd_settimeframe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode="HTML",
         )
         return
-
     tf = ctx.args[0].lower()
     if tf not in VALID_TIMEFRAMES:
-        opts = ", ".join(VALID_TIMEFRAMES)
         await update.effective_message.reply_text(
-            f"❌ Invalid timeframe. Choose from: {opts}", parse_mode="HTML"
+            f"❌ Invalid timeframe. Choose from: {', '.join(VALID_TIMEFRAMES)}", parse_mode="HTML"
         )
         return
-
     set_timeframe(tf)
     await update.effective_message.reply_text(
         f"✅ Timeframe set to <b>{tf}</b>", parse_mode="HTML"
@@ -316,17 +338,15 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not pairs:
         await update.effective_message.reply_text(
             "📋 <b>Active Pairs</b>\n\nNo pairs added yet.\n\n"
-            "Add one: <code>/addpair BTC/USDT</code>",
+            "Add one:    <code>/addpair BTC/USDT</code>\n"
+            "Load top:   <code>/loadtop 20</code>",
             parse_mode="HTML",
         )
         return
-
     await update.effective_message.reply_text(
-        f"📋 <b>Active Pairs</b> ({len(pairs)} total)\n\n"
-        f"Tap ❌ to remove a pair.\n"
-        f"Add new: <code>/addpair SOL/USDT</code>",
+        _pairs_message(pairs, 0),
         parse_mode="HTML",
-        reply_markup=_pairs_keyboard(pairs),
+        reply_markup=_pairs_keyboard(pairs, 0),
     )
 
 
@@ -339,24 +359,25 @@ async def cmd_addpair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Usage: <code>/addpair BTC/USDT</code>", parse_mode="HTML"
         )
         return
-
-    # BUG FIX: normalize symbol to strip :USDT perp suffix before storing
     symbol = normalize_symbol(ctx.args[0])
-
     if "/" not in symbol:
         await update.effective_message.reply_text(
             "❌ Invalid format. Use <code>BASE/QUOTE</code> e.g. <code>BTC/USDT</code>",
             parse_mode="HTML",
         )
         return
-
     pairs = get_active_pairs()
+    if len(pairs) >= 50:
+        await update.effective_message.reply_text(
+            "⚠️ Maximum of 50 pairs reached. Remove some before adding more.",
+            parse_mode="HTML",
+        )
+        return
     if symbol not in pairs:
         pairs.append(symbol)
         set_active_pairs(pairs)
         await update.effective_message.reply_text(
-            f"✅ Added <b>{html.escape(symbol)}</b>\n\n"
-            f"Active pairs: <b>{', '.join(pairs)}</b>",
+            f"✅ Added <b>{html.escape(symbol)}</b>  ({len(pairs)}/50 pairs)",
             parse_mode="HTML",
         )
     else:
@@ -374,21 +395,62 @@ async def cmd_removepair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "Usage: <code>/removepair ETH/USDT</code>", parse_mode="HTML"
         )
         return
-
     symbol = normalize_symbol(ctx.args[0])
     pairs = get_active_pairs()
     if symbol in pairs:
         pairs.remove(symbol)
         set_active_pairs(pairs)
-        remaining = ", ".join(pairs) if pairs else "None"
+        remaining = f"{len(pairs)} pairs remaining"
         await update.effective_message.reply_text(
-            f"✅ Removed <b>{html.escape(symbol)}</b>\n\n"
-            f"Remaining: <b>{html.escape(remaining)}</b>",
+            f"✅ Removed <b>{html.escape(symbol)}</b>  ({remaining})",
             parse_mode="HTML",
         )
     else:
         await update.effective_message.reply_text(
             f"⚠️ <b>{html.escape(symbol)}</b> not found in active pairs.", parse_mode="HTML"
+        )
+
+
+# ── /loadtop ──────────────────────────────────────────────────────────────────
+
+@admin_only
+async def cmd_loadtop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /loadtop [N]   — replace active pairs with the top-N Bitget USDT pairs
+                     by 24h volume.  N defaults to 20, max 50.
+    """
+    n = 20
+    if ctx.args:
+        try:
+            n = int(ctx.args[0])
+            if not 1 <= n <= 50:
+                raise ValueError
+        except ValueError:
+            await update.effective_message.reply_text(
+                "❌ Usage: <code>/loadtop 20</code>  (1 – 50)", parse_mode="HTML"
+            )
+            return
+
+    msg = await update.effective_message.reply_text(
+        f"🌐 Fetching top {n} USDT pairs from Bitget by 24h volume…"
+    )
+    try:
+        from trading.executor import fetch_top_usdt_pairs
+        pairs = fetch_top_usdt_pairs(n)
+        if not pairs:
+            await msg.edit_text("❌ No pairs returned — Bitget may be unreachable.")
+            return
+        set_active_pairs(pairs)
+        pair_list = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(pairs))
+        await msg.edit_text(
+            f"✅ Loaded <b>{len(pairs)}</b> pairs:\n\n<code>{pair_list}</code>\n\n"
+            f"Use 📋 My Pairs to manage them.",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        await msg.edit_text(
+            f"❌ Error fetching pairs: <code>{html.escape(str(exc))}</code>",
+            parse_mode="HTML",
         )
 
 
@@ -459,7 +521,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
         finally:
             _waiting_for.pop(user_id, None)
-    # else: ignore unrecognised text
 
 
 # ── Inline button router ──────────────────────────────────────────────────────
@@ -471,7 +532,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     data = q.data
 
     if data == "noop":
-        return  # Pair label button — do nothing
+        return
 
     elif data == "status":
         await cmd_status(update, ctx)
@@ -491,26 +552,41 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     elif data == "menu":
         await cmd_menu(update, ctx)
 
-    # ── Inline pair removal (❌ button next to each pair) ────────────────────
-    elif data.startswith("rm_pair:"):
-        symbol = data.split(":", 1)[1]
+    # ── Pairs pagination ──────────────────────────────────────────────────────
+    elif data.startswith("pairs_pg:"):
+        page = int(data.split(":")[1])
         pairs = get_active_pairs()
+        await q.message.edit_text(
+            _pairs_message(pairs, page),
+            parse_mode="HTML",
+            reply_markup=_pairs_keyboard(pairs, page),
+        )
+
+    # ── Inline pair removal ───────────────────────────────────────────────────
+    elif data.startswith("rm_pair:"):
+        # Format: rm_pair:SYMBOL:PAGE
+        parts = data.split(":", 2)
+        symbol = parts[1] if len(parts) > 1 else ""
+        page   = int(parts[2]) if len(parts) > 2 else 0
+        pairs  = get_active_pairs()
         if symbol in pairs:
             pairs.remove(symbol)
             set_active_pairs(pairs)
             if pairs:
-                await update.effective_message.edit_text(
+                # Clamp page in case we removed the last item on last page
+                total_pages = max(1, math.ceil(len(pairs) / PAIRS_PAGE_SIZE))
+                page = min(page, total_pages - 1)
+                await q.message.edit_text(
                     f"✅ Removed <b>{html.escape(symbol)}</b>\n\n"
-                    f"📋 <b>Active Pairs</b> ({len(pairs)} total)\n\n"
-                    f"Tap ❌ to remove a pair.\n"
-                    f"Add new: <code>/addpair SOL/USDT</code>",
+                    + _pairs_message(pairs, page),
                     parse_mode="HTML",
-                    reply_markup=_pairs_keyboard(pairs),
+                    reply_markup=_pairs_keyboard(pairs, page),
                 )
             else:
-                await update.effective_message.edit_text(
+                await q.message.edit_text(
                     f"✅ Removed <b>{html.escape(symbol)}</b>\n\n"
-                    f"📋 No pairs left. Add one: <code>/addpair BTC/USDT</code>",
+                    f"📋 No pairs left. Add one: <code>/addpair BTC/USDT</code>\n"
+                    f"Or load top: <code>/loadtop 20</code>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")
@@ -521,7 +597,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 f"⚠️ {html.escape(symbol)} not found (already removed?)."
             )
 
-    # ── Set Amount (prompt user to type the value) ────────────────────────────
+    # ── Set Amount ────────────────────────────────────────────────────────────
     elif data == "set_amount":
         cfg = get_settings()
         current = (
@@ -529,12 +605,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             if cfg.trade_amount_usdt
             else f"{cfg.risk_percent}% risk"
         )
-        user_id = update.effective_user.id
-        _waiting_for[user_id] = "amount"
+        _waiting_for[update.effective_user.id] = "amount"
         await update.effective_message.reply_text(
             f"💵 <b>Set Trade Amount</b>\n"
             f"Current: <b>{current}</b>\n\n"
-            f"Reply with the USDT amount to spend per trade.\n"
+            f"Reply with the USDT amount per trade.\n"
             f"Example: <code>100</code> → $100 per trade\n"
             f"Send <code>0</code> to revert to risk-% sizing.",
             parse_mode="HTML",
@@ -546,7 +621,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         current_tf = cfg.timeframe or "15m"
         tf_buttons: list[list[InlineKeyboardButton]] = []
         row: list[InlineKeyboardButton] = []
-        for i, tf in enumerate(VALID_TIMEFRAMES):
+        for tf in VALID_TIMEFRAMES:
             label = f"✅ {tf}" if tf == current_tf else tf
             row.append(InlineKeyboardButton(label, callback_data=f"set_tf:{tf}"))
             if len(row) == 3:
@@ -555,7 +630,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if row:
             tf_buttons.append(row)
         tf_buttons.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
-
         await update.effective_message.reply_text(
             f"⏱ <b>Select Timeframe</b>\n"
             f"Current: <b>{current_tf}</b>",
@@ -563,7 +637,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             reply_markup=InlineKeyboardMarkup(tf_buttons),
         )
 
-    # ── Timeframe selection ───────────────────────────────────────────────────
     elif data.startswith("set_tf:"):
         tf = data.split(":", 1)[1]
         if tf in VALID_TIMEFRAMES:
@@ -575,6 +648,48 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         else:
             await update.effective_message.reply_text("❌ Unknown timeframe.")
 
+    # ── Load Top Pairs menu ───────────────────────────────────────────────────
+    elif data == "load_top_menu":
+        rows = []
+        row = []
+        for n in [10, 20, 30, 50]:
+            row.append(InlineKeyboardButton(f"Top {n}", callback_data=f"load_top:{n}"))
+        rows.append(row)
+        rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
+        await update.effective_message.reply_text(
+            "🌐 <b>Load Top USDT Pairs</b>\n\n"
+            "Replaces your current pair list with the highest-volume\n"
+            "USDT pairs on Bitget spot.\n\n"
+            "How many pairs do you want to monitor?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    elif data.startswith("load_top:"):
+        n = int(data.split(":")[1])
+        await q.message.edit_text(
+            f"🌐 Fetching top {n} USDT pairs from Bitget…"
+        )
+        try:
+            from trading.executor import fetch_top_usdt_pairs
+            pairs = fetch_top_usdt_pairs(n)
+            if not pairs:
+                await q.message.edit_text("❌ No pairs returned — Bitget may be unreachable.")
+                return
+            set_active_pairs(pairs)
+            pair_list = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(pairs))
+            await q.message.edit_text(
+                f"✅ Loaded <b>{len(pairs)}</b> top pairs:\n\n"
+                f"<code>{pair_list}</code>\n\n"
+                f"Use 📋 My Pairs to view/manage them.",
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            await q.message.edit_text(
+                f"❌ Error: <code>{html.escape(str(exc))}</code>",
+                parse_mode="HTML",
+            )
+
     else:
         logger.warning("Unknown callback_data: %s", data)
 
@@ -582,7 +697,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # ── Alert formatters ──────────────────────────────────────────────────────────
 
 def alert_signal(symbol: str, signal) -> None:
-    # BUG FIX: normalize symbol in alert so display is always BTC/USDT not BTC/USDT:USDT
     disp = normalize_symbol(symbol)
     send_alert(
         f"📡 <b>SMC Signal — {html.escape(disp)}</b>\n\n"
@@ -641,20 +755,15 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("pairs",         cmd_pairs))
     app.add_handler(CommandHandler("addpair",       cmd_addpair))
     app.add_handler(CommandHandler("removepair",    cmd_removepair))
+    app.add_handler(CommandHandler("loadtop",       cmd_loadtop))
     app.add_handler(CommandHandler("closeall",      cmd_closeall))
     app.add_handler(CallbackQueryHandler(button_handler))
-    # Free-text handler for amount prompts (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     return app
 
 
 def run_bot_in_thread(app: Application) -> None:
-    """
-    PTB v21 run_polling() installs OS signal handlers which only work from the
-    main thread. Fix: call the lower-level initialize/start/start_polling
-    directly without the signal-handler wrapper, then keep the loop alive.
-    """
     global _bot_loop
 
     async def _run():

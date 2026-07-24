@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -25,9 +26,9 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 # ── Signal cooldown ───────────────────────────────────────────────────────────
-# BUG FIX: without a cooldown, every scan cycle that sees the same candle
-# pattern fires a duplicate alert.  5-minute minimum gap per symbol.
-SIGNAL_COOLDOWN_SECONDS = 300
+# Prevents duplicate alerts when the same candle pattern persists across
+# multiple 60-second scan cycles.
+SIGNAL_COOLDOWN_SECONDS = 300   # 5 minutes per symbol
 _last_signal_time: dict[str, float] = {}
 
 
@@ -49,7 +50,7 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-# ── Single scan cycle ─────────────────────────────────────────────────────────
+# ── Single pair scan (runs in thread pool) ────────────────────────────────────
 
 def scan_pair(
     symbol: str,
@@ -59,7 +60,6 @@ def scan_pair(
 ) -> None:
     logger.debug("Scanning %s  tf=%s", symbol, timeframe)
 
-    # Skip sending another alert if one just fired for this symbol
     if _is_on_cooldown(symbol):
         logger.debug("%s: on signal cooldown, skipping", symbol)
         return
@@ -77,20 +77,18 @@ def scan_pair(
             logger.debug("%s: no signal", symbol)
             return
 
-        # Spot only — guard against any non-long signal
         if signal.side != "long":
             logger.debug("%s: non-long signal skipped (spot only)", symbol)
             return
 
         logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
 
-        # Attempt to open the trade FIRST
+        # Open position FIRST, then alert
         trade = open_position(
             symbol, signal, risk_percent,
             trade_amount_usdt=trade_amount_usdt,
         )
 
-        # Only send alert after trade attempt and mark cooldown
         _mark_signal_sent(symbol)
         alert_signal(symbol, signal)
         if trade:
@@ -103,10 +101,17 @@ def scan_pair(
 
 # ── Main trading loop ─────────────────────────────────────────────────────────
 
+# Max parallel OHLCV requests — Bitget rate-limits are generous for spot,
+# but keep threads conservative to avoid connection pool exhaustion.
+MAX_SCAN_WORKERS = 8
+
+
 def trading_loop() -> None:
-    logger.info("Trading loop started  interval=%ds", SCAN_INTERVAL_SECONDS)
+    logger.info("Trading loop started  interval=%ds  max_workers=%d",
+                SCAN_INTERVAL_SECONDS, MAX_SCAN_WORKERS)
 
     while True:
+        loop_start = time.monotonic()
         try:
             cfg = get_settings()
             timeframe = cfg.timeframe or "15m"
@@ -122,22 +127,36 @@ def trading_loop() -> None:
             except Exception:
                 balance = 0.0
 
+            pairs = get_active_pairs()
+
             set_status({
                 "trading_enabled": cfg.trading_enabled,
                 "balance_usdt": round(balance, 2),
-                "active_pairs": get_active_pairs(),
+                "active_pairs": pairs,
+                "pair_count": len(pairs),
                 "timeframe": timeframe,
                 "trade_amount_usdt": cfg.trade_amount_usdt,
             })
 
             if cfg.trading_enabled:
-                for pair in get_active_pairs():
-                    scan_pair(
-                        pair,
-                        cfg.risk_percent,
-                        timeframe,
-                        trade_amount_usdt=cfg.trade_amount_usdt,
-                    )
+                # ── Parallel scan for up to 50 pairs ─────────────────────────
+                # Each pair's OHLCV fetch is I/O-bound; threads let us fetch
+                # all 50 pairs in ~the time of the slowest single fetch instead
+                # of 50× sequential fetches.
+                with ThreadPoolExecutor(max_workers=MAX_SCAN_WORKERS) as pool:
+                    futures = {
+                        pool.submit(
+                            scan_pair, pair, cfg.risk_percent, timeframe,
+                            cfg.trade_amount_usdt
+                        ): pair
+                        for pair in pairs
+                    }
+                    for fut in as_completed(futures, timeout=55):
+                        pair = futures[fut]
+                        try:
+                            fut.result()
+                        except Exception as exc:
+                            logger.error("scan worker %s raised: %s", pair, exc)
             else:
                 logger.info("Trading paused — skipping scan")
 
@@ -145,7 +164,11 @@ def trading_loop() -> None:
             logger.exception("Unexpected error in trading loop: %s", exc)
             alert_error("trading_loop", exc)
 
-        time.sleep(SCAN_INTERVAL_SECONDS)
+        # Sleep the remainder of the interval (accounts for scan time)
+        elapsed = time.monotonic() - loop_start
+        sleep_for = max(0.0, SCAN_INTERVAL_SECONDS - elapsed)
+        logger.debug("Loop finished in %.1fs — sleeping %.1fs", elapsed, sleep_for)
+        time.sleep(sleep_for)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
