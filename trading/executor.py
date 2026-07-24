@@ -145,37 +145,38 @@ def open_position(
         balance = fetch_usdt_balance()
 
         if trade_amount_usdt and trade_amount_usdt > 0:
-            if balance < trade_amount_usdt:
-                msg = (
-                    f"Insufficient balance for {symbol}: "
-                    f"need ${trade_amount_usdt:.2f}, have ${balance:.2f} USDT"
-                )
-                logger.warning(msg)
-                db_log("WARN", msg)
-                return None
-            
-            # For Bitget spot market buy, we MUST pass the price to calculate cost
-            # or use create_market_buy_order with the cost in USDT
-            sizing_note = f"fixed ${trade_amount_usdt:.2f} USDT"
-            # Bitget market buy: amount is the cost in USDT
-            order = ex.create_market_buy_order(symbol, trade_amount_usdt)
-            qty = float(order.get('filled', 0) or order.get('amount', 0))
+            cost = trade_amount_usdt
+            sizing_note = f"fixed ${cost:.2f} USDT"
         else:
             qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
+            cost = qty * signal.entry
             sizing_note = f"risk {risk_percent}%"
 
-            if qty <= 0:
-                logger.warning("Position size is zero for %s (%s) — skipping", symbol, sizing_note)
-                return None
-            
-            # For Bitget market buy with specific qty, we still need to pass price
-            # but it's safer to convert to cost (qty * entry) and use market_buy
-            cost = qty * signal.entry
-            if cost < 2.0:
-                logger.warning("Cost %.2f below minimum 2 USDT — skipping %s", cost, symbol)
-                return None
-            order = ex.create_market_buy_order(symbol, cost)
-            qty = float(order.get('filled', 0) or order.get('amount', 0))
+        if cost < 2.0:
+            logger.warning("Cost %.2f below minimum 2 USDT — skipping %s", cost, symbol)
+            return None
+
+        if balance < cost:
+            msg = f"Insufficient balance for {symbol}: need ${cost:.2f}, have ${balance:.2f} USDT"
+            logger.warning(msg)
+            db_log("WARN", msg)
+            return None
+
+        # Bitget market buy: we pass the cost in USDT as the 'amount'
+        # and we MUST set createMarketBuyOrderRequiresPrice: False in params
+        params = {'createMarketBuyOrderRequiresPrice': False}
+        order = ex.create_order(symbol, 'market', 'buy', cost, None, params)
+        
+        qty = float(order.get('filled', 0) or order.get('amount', 0))
+        if qty <= 0:
+            # If filled is not in the response, try to fetch the order
+            try:
+                order_id = order.get('id')
+                if order_id:
+                    order = ex.fetch_order(order_id, symbol)
+                    qty = float(order.get('filled', 0) or order.get('amount', 0))
+            except Exception:
+                pass
         order_id = str(order.get("id", ""))
         actual_price = float(order.get("average") or order.get("price") or signal.entry)
 
