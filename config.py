@@ -24,14 +24,13 @@ DATABASE_URL: str = _require("DATABASE_URL")
 # ── Bot defaults (overridden by DB settings) ──────────────────────────────────
 DEFAULT_RISK_PERCENT: float = float(os.environ.get("DEFAULT_RISK_PCT", "1.0"))
 DEFAULT_PAIRS: list[str] = [
-    p.strip() for p in os.environ.get("DEFAULT_PAIRS", "BTC/USDT:USDT,ETH/USDT:USDT").split(",")
+    p.strip() for p in os.environ.get("DEFAULT_PAIRS", "BTC/USDT,ETH/USDT").split(",")
 ]
 
 # ── Strategy ──────────────────────────────────────────────────────────────────
 SCAN_INTERVAL_SECONDS: int = int(os.environ.get("SCAN_INTERVAL_SECONDS", "60"))
 TIMEFRAME: str = os.environ.get("TIMEFRAME", "15m")
 KLINE_LIMIT: int = int(os.environ.get("KLINE_LIMIT", "200"))
-LEVERAGE: int = int(os.environ.get("LEVERAGE", "10"))
 
 # ── Health server ─────────────────────────────────────────────────────────────
 PORT: int = int(os.environ.get("PORT", "8080"))

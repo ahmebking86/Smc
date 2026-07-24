@@ -6,7 +6,7 @@ from typing import Optional
 
 import ccxt
 
-from config import BITGET_API_KEY, BITGET_SECRET, BITGET_PASSPHRASE, LEVERAGE
+from config import BITGET_API_KEY, BITGET_SECRET, BITGET_PASSPHRASE
 from database import (
     Trade, save_trade, get_open_trade_for_symbol,
     close_trade, get_open_trades, db_log,
@@ -23,7 +23,7 @@ def make_exchange() -> ccxt.bitget:
         "apiKey": BITGET_API_KEY,
         "secret": BITGET_SECRET,
         "password": BITGET_PASSPHRASE,
-        "options": {"defaultType": "swap"},
+        "options": {"defaultType": "spot"},
     })
     ex.load_markets()
     return ex
@@ -43,19 +43,8 @@ def get_exchange() -> ccxt.bitget:
 
 def fetch_usdt_balance() -> float:
     ex = get_exchange()
-    bal = ex.fetch_balance({"type": "swap"})
+    bal = ex.fetch_balance({"type": "spot"})
     return float(bal.get("USDT", {}).get("free", 0.0))
-
-
-# ── Leverage ──────────────────────────────────────────────────────────────────
-
-def set_leverage(symbol: str, leverage: int = LEVERAGE) -> None:
-    try:
-        ex = get_exchange()
-        ex.set_leverage(leverage, symbol, {"marginMode": "isolated"})
-        logger.info("Leverage set to %dx for %s", leverage, symbol)
-    except Exception as exc:
-        logger.warning("Could not set leverage for %s: %s", symbol, exc)
 
 
 # ── Fetch OHLCV ───────────────────────────────────────────────────────────────
@@ -79,18 +68,21 @@ def open_position(
         logger.info("Already have open trade for %s — skipping", symbol)
         return None
 
+    # Spot only supports LONG (buy). Skip SHORT signals.
+    if signal.side != "long":
+        logger.info("Skipping SHORT signal for %s — spot trading only supports LONG", symbol)
+        return None
+
     ex = get_exchange()
-    set_leverage(symbol)
 
     try:
         balance = fetch_usdt_balance()
-        qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss, LEVERAGE)
+        qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
         if qty <= 0:
             logger.warning("Position size is zero for %s — skipping", symbol)
             return None
 
-        side = "buy" if signal.side == "long" else "sell"
-        order = ex.create_market_order(symbol, side, qty)
+        order = ex.create_market_order(symbol, "buy", qty)
         order_id = str(order.get("id", ""))
         actual_price = float(order.get("average") or order.get("price") or signal.entry)
 
@@ -162,8 +154,8 @@ def _check_sl_tp(trade: Trade, price: float) -> Optional[str]:
 
 def _close_position(ex: ccxt.bitget, trade: Trade, price: float, reason: str) -> None:
     try:
-        side = "sell" if trade.side == "long" else "buy"
-        ex.create_market_order(trade.symbol, side, trade.quantity, params={"reduceOnly": True})
+        # Spot: sell the base currency to get USDT back
+        ex.create_market_order(trade.symbol, "sell", trade.quantity)
     except Exception as exc:
         logger.error("Close order failed %s: %s", trade.symbol, exc)
 
