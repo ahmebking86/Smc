@@ -83,16 +83,19 @@ def scan_pair(
 
         logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
 
-        # Open position FIRST, then alert
+        # Open position FIRST
         trade = open_position(
             symbol, signal, risk_percent,
             trade_amount_usdt=trade_amount_usdt,
         )
 
-        _mark_signal_sent(symbol)
-        alert_signal(symbol, signal)
+        # ONLY alert if a trade was actually opened on the exchange
         if trade:
+            _mark_signal_sent(symbol)
+            # alert_signal(symbol, signal)  # Removed to prevent "fake" signal noise
             alert_trade_opened(symbol, trade)
+        else:
+            logger.debug("%s: signal detected but trade not opened (balance/limits/error)", symbol)
 
     except Exception as exc:
         logger.error("scan_pair(%s): %s", symbol, exc)

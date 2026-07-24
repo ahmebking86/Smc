@@ -323,15 +323,23 @@ def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
         logger.debug("Invalid SL/TP geometry — skipping signal")
         return None
 
-    # Stale zone check: price already well above zone
+    # ── Entry Filtering ───────────────────────────────────────────────────────
+    # 1. Stale zone: Price has already moved above the zone
     if current_price > zone_top:
         logger.debug("Price %.6f already above zone %.6f — stale, skipping", current_price, zone_top)
         return None
 
-    # Price must be close to the zone (within 1 ATR) to avoid "random" alerts
-    if current_price > zone_top + atr_val:
-        logger.debug("Price %.6f too far from zone %.6f — skipping", current_price, zone_top)
+    # 2. Distance: Price must be very close to the zone (within 0.5 ATR)
+    # This prevents catching "random" alerts far from the actual setup.
+    if current_price > zone_top + (atr_val * 0.5):
+        logger.debug("Price %.6f too far from zone %.6f (dist > 0.5 ATR) — skipping", current_price, zone_top)
         return None
+    
+    # 3. Trend alignment: Ensure we are not catching a falling knife
+    # Price should be starting to bounce or at least stabilising
+    if current_price < zone_bottom:
+         logger.debug("Price %.6f below zone bottom %.6f — potential breakdown, skipping", current_price, zone_bottom)
+         return None
 
     return TradeSignal(
         side="long",
