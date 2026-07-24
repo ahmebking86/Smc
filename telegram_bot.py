@@ -524,28 +524,34 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             _waiting_for.pop(user_id, None)
 
-    elif state == "api_setup":
-        raw = (update.effective_message.text or "").strip()
-        parts = [p.strip() for p in raw.split(",")]
-        if len(parts) != 3:
-            await update.effective_message.reply_text(
-                "❌ Invalid format. Please use: <code>KEY, SECRET, PASSPHRASE</code>",
-                parse_mode="HTML",
-            )
-            return
+    elif state == "api_step_1":
+        ctx.user_data["tmp_key"] = (update.effective_message.text or "").strip()
+        _waiting_for[user_id] = "api_step_2"
+        await update.effective_message.reply_text("🔑 <b>Step 2/3: Setup Secret</b>\n\nPlease send your <b>API SECRET</b>:", parse_mode="HTML")
+
+    elif state == "api_step_2":
+        ctx.user_data["tmp_secret"] = (update.effective_message.text or "").strip()
+        _waiting_for[user_id] = "api_step_3"
+        await update.effective_message.reply_text("🔑 <b>Step 3/3: Setup Passphrase</b>\n\nPlease send your <b>PASSPHRASE</b>:", parse_mode="HTML")
+
+    elif state == "api_step_3":
+        passphrase = (update.effective_message.text or "").strip()
+        api_key = ctx.user_data.get("tmp_key")
+        secret = ctx.user_data.get("tmp_secret")
         
         from database import set_api_keys
         from trading.executor import _reset_exchange
-        set_api_keys(parts[0], parts[1], parts[2])
+        set_api_keys(api_key, secret, passphrase)
         _reset_exchange()
         
         await update.effective_message.reply_text(
-            "✅ <b>API Credentials Updated!</b>\n"
-            "The bot will now use these keys for trading.\n\n"
-            "Type /menu to go back.",
+            "✅ <b>API Credentials Updated Successfully!</b>\n"
+            "The bot is now connected to Bitget.\n\n"
+            "Type /menu to return.",
             parse_mode="HTML",
         )
         _waiting_for.pop(user_id, None)
+        ctx.user_data.clear()
 
     elif state == "bulk_pairs":
         raw = (update.effective_message.text or "").strip()
@@ -761,13 +767,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # ── Setup API ─────────────────────────────────────────────────────────────
     elif data == "setup_api":
-        _waiting_for[update.effective_user.id] = "api_setup"
+        _waiting_for[update.effective_user.id] = "api_step_1"
         await update.effective_message.reply_text(
-            "🔑 <b>Setup Bitget API</b>\n\n"
-            "Please send your API credentials in this format:\n"
-            "<code>API_KEY, SECRET, PASSPHRASE</code>\n\n"
-            "Example:\n"
-            "<code>bg_xxxx, 12345678, mypass123</code>",
+            "🔑 <b>Step 1/3: Setup API Key</b>\n\n"
+            "Please send your <b>API KEY</b>:",
             parse_mode="HTML",
         )
 
