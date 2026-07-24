@@ -186,13 +186,19 @@ def open_position(
 
         # ── Bitget v2 Spot Market Buy ──
         # In v2 Spot, market buy uses 'size' as the USDT cost.
-        # We use the generic create_order but with the specific v2 params.
+        # Ensure symbol is in Bitget format (e.g. BTCUSDT)
+        bitget_symbol = symbol.replace("/", "")
+        
         params = {
+            'symbol': bitget_symbol,
+            'side': 'buy',
             'orderType': 'market',
             'force': 'fok',
+            'size': f"{cost:.2f}",
         }
-        # CCXT will map 'amount' to 'size' in the Bitget v2 request
-        order = ex.create_order(symbol, 'market', 'buy', cost, None, params)
+        
+        # Use direct private post to bypass CCXT mapping issues
+        order = ex.private_post_spot_v2_trade_place_order(params)
         
         qty = float(order.get('filled', 0) or order.get('amount', 0))
         if qty <= 0:

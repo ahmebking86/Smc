@@ -855,8 +855,17 @@ def run_bot_in_thread(app: Application) -> None:
         _bot_loop = asyncio.get_running_loop()
         await app.initialize()
         await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram bot polling started")
+        # Add a small delay to avoid conflict with previous instance
+        await asyncio.sleep(3)
+        try:
+            await app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram bot polling started")
+        except Exception as e:
+            if "Conflict" in str(e):
+                logger.warning("Telegram conflict detected, retrying in 10s...")
+                await asyncio.sleep(10)
+                await app.updater.start_polling(drop_pending_updates=True)
+        
         while True:
             await asyncio.sleep(3600)
 
