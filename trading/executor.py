@@ -33,25 +33,45 @@ _exchange: Optional[ccxt.bitget] = None
 
 
 def get_exchange() -> ccxt.bitget:
+    """
+    Return (or create) the exchange singleton.
+    BUG FIX: resets the singleton if a NetworkError is raised so the next
+    call will reconnect instead of reusing a broken connection object.
+    """
     global _exchange
     if _exchange is None:
         _exchange = make_exchange()
     return _exchange
 
 
+def _reset_exchange() -> None:
+    global _exchange
+    _exchange = None
+
+
 # ── Balance ───────────────────────────────────────────────────────────────────
 
 def fetch_usdt_balance() -> float:
-    ex = get_exchange()
-    bal = ex.fetch_balance({"type": "spot"})
-    return float(bal.get("USDT", {}).get("free", 0.0))
+    try:
+        ex = get_exchange()
+        bal = ex.fetch_balance({"type": "spot"})
+        return float(bal.get("USDT", {}).get("free", 0.0))
+    except ccxt.NetworkError:
+        _reset_exchange()
+        raise
+    except ccxt.ExchangeError:
+        raise
 
 
 # ── Fetch OHLCV ───────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int) -> list:
-    ex = get_exchange()
-    return ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    try:
+        ex = get_exchange()
+        return ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    except ccxt.NetworkError:
+        _reset_exchange()
+        raise
 
 
 # ── Open position ─────────────────────────────────────────────────────────────
@@ -67,31 +87,44 @@ def open_position(
 
     Sizing priority:
       1. trade_amount_usdt — fixed USDT amount (set via Telegram button)
-      2. risk_percent      — % of balance risked on SL distance (legacy default)
+      2. risk_percent      — % of balance risked on SL distance (default)
 
-    Returns Trade on success, None on failure or skip.
+    BUG FIX: always fetches balance and checks sufficiency, even in
+    fixed-amount mode, and sends a Telegram-visible warning if insufficient.
+
+    Returns Trade on success, None on failure / skip.
     """
-    # Avoid duplicate positions on same symbol
     existing = get_open_trade_for_symbol(symbol)
     if existing:
         logger.info("Already have open trade for %s — skipping", symbol)
         return None
 
-    # Spot only supports LONG (buy). Skip SHORT signals.
+    # Spot only: skip short signals (generate_signal now never emits them,
+    # but guard here in case the function is called directly).
     if signal.side != "long":
-        logger.info("Skipping SHORT signal for %s — spot trading only supports LONG", symbol)
+        logger.info("Skipping non-long signal for %s (spot only)", symbol)
         return None
 
     ex = get_exchange()
 
     try:
+        # Always fetch balance first — needed for both sizing modes
+        balance = fetch_usdt_balance()
+
         if trade_amount_usdt and trade_amount_usdt > 0:
             # Fixed USDT amount mode
+            if balance < trade_amount_usdt:
+                msg = (
+                    f"Insufficient balance for {symbol}: "
+                    f"need ${trade_amount_usdt:.2f}, have ${balance:.2f} USDT"
+                )
+                logger.warning(msg)
+                db_log("WARN", msg)
+                return None
             qty = fixed_position_size(trade_amount_usdt, signal.entry)
-            sizing_note = f"fixed ${trade_amount_usdt} USDT"
+            sizing_note = f"fixed ${trade_amount_usdt:.2f} USDT"
         else:
             # Risk-percent mode
-            balance = fetch_usdt_balance()
             qty = position_size(balance, risk_percent, signal.entry, signal.stop_loss)
             sizing_note = f"risk {risk_percent}%"
 
@@ -115,12 +148,23 @@ def open_position(
         )
         saved = save_trade(trade)
         logger.info(
-            "Opened %s %s @ %.6f  qty=%.4f  SL=%.6f  TP=%.6f  [%s]",
-            signal.side, symbol, actual_price, qty, signal.stop_loss, signal.take_profit, sizing_note,
+            "Opened %s %s @ %.6f  qty=%.6f  SL=%.6f  TP=%.6f  [%s]",
+            signal.side, symbol, actual_price, qty,
+            signal.stop_loss, signal.take_profit, sizing_note,
         )
-        db_log("INFO", f"Opened {signal.side} {symbol} @ {actual_price:.6f} [{signal.signal_type}] ({sizing_note})")
+        db_log(
+            "INFO",
+            f"Opened {signal.side} {symbol} @ {actual_price:.6f} "
+            f"[{signal.signal_type}] ({sizing_note})",
+        )
         return saved
 
+    except ccxt.NetworkError as exc:
+        _reset_exchange()
+        msg = f"Network error opening {symbol}: {exc}"
+        logger.error(msg)
+        db_log("ERROR", msg)
+        return None
     except Exception as exc:
         msg = f"Failed to open {symbol}: {exc}"
         logger.error(msg)
@@ -132,23 +176,21 @@ def open_position(
 
 def monitor_open_trades() -> list[dict]:
     """Check all open trades against current price. Close if SL/TP hit."""
-    ex = get_exchange()
     alerts: list[dict] = []
 
     for trade in get_open_trades():
         try:
+            ex = get_exchange()
             ticker = ex.fetch_ticker(trade.symbol)
             price = float(ticker["last"])
             hit = _check_sl_tp(trade, price)
             if hit:
                 _close_position(ex, trade, price, hit)
                 pnl = _calc_pnl(trade, price)
-                alerts.append({
-                    "trade": trade,
-                    "reason": hit,
-                    "price": price,
-                    "pnl": pnl,
-                })
+                alerts.append({"trade": trade, "reason": hit, "price": price, "pnl": pnl})
+        except ccxt.NetworkError as exc:
+            _reset_exchange()
+            logger.error("Network error monitoring %s: %s", trade.symbol, exc)
         except Exception as exc:
             logger.error("monitor error %s: %s", trade.symbol, exc)
 
@@ -161,47 +203,48 @@ def _check_sl_tp(trade: Trade, price: float) -> Optional[str]:
             return "SL"
         if price >= trade.take_profit:
             return "TP"
-    else:
-        if price >= trade.stop_loss:
-            return "SL"
-        if price <= trade.take_profit:
-            return "TP"
     return None
 
 
 def _close_position(ex: ccxt.bitget, trade: Trade, price: float, reason: str) -> None:
     try:
-        # Spot: sell the base currency to get USDT back
         ex.create_market_order(trade.symbol, "sell", trade.quantity)
     except Exception as exc:
         logger.error("Close order failed %s: %s", trade.symbol, exc)
 
     pnl = _calc_pnl(trade, price)
     close_trade(trade.id, price, pnl, reason)
-    logger.info("Closed %s %s @ %.6f  PnL=%.4f  [%s]", trade.side, trade.symbol, price, pnl, reason)
-    db_log("INFO", f"Closed {trade.side} {trade.symbol} @ {price:.6f}  PnL={pnl:.4f} [{reason}]")
+    logger.info(
+        "Closed %s %s @ %.6f  PnL=%.4f  [%s]",
+        trade.side, trade.symbol, price, pnl, reason,
+    )
+    db_log(
+        "INFO",
+        f"Closed {trade.side} {trade.symbol} @ {price:.6f}  PnL={pnl:.4f} [{reason}]",
+    )
 
 
 def _calc_pnl(trade: Trade, exit_price: float) -> float:
-    if trade.side == "long":
-        return (exit_price - trade.entry_price) * trade.quantity
-    else:
-        return (trade.entry_price - exit_price) * trade.quantity
+    # Spot: only long positions exist
+    return (exit_price - trade.entry_price) * trade.quantity
 
 
 # ── Close all (emergency) ────────────────────────────────────────────────────
 
 def close_all_positions() -> int:
     """Force-close every open trade. Returns count closed."""
-    ex = get_exchange()
     trades = get_open_trades()
     closed = 0
     for trade in trades:
         try:
+            ex = get_exchange()
             ticker = ex.fetch_ticker(trade.symbol)
             price = float(ticker["last"])
             _close_position(ex, trade, price, "MANUAL")
             closed += 1
+        except ccxt.NetworkError as exc:
+            _reset_exchange()
+            logger.error("Network error during emergency close %s: %s", trade.symbol, exc)
         except Exception as exc:
             logger.error("Emergency close failed %s: %s", trade.symbol, exc)
     return closed

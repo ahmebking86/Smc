@@ -36,7 +36,12 @@ def ohlcv_to_df(raw: list) -> pd.DataFrame:
 
 # ── Single scan cycle ─────────────────────────────────────────────────────────
 
-def scan_pair(symbol: str, risk_percent: float, timeframe: str, trade_amount_usdt=None) -> None:
+def scan_pair(
+    symbol: str,
+    risk_percent: float,
+    timeframe: str,
+    trade_amount_usdt=None,
+) -> None:
     logger.debug("Scanning %s  tf=%s", symbol, timeframe)
     try:
         raw = fetch_ohlcv(symbol, timeframe, KLINE_LIMIT)
@@ -51,13 +56,24 @@ def scan_pair(symbol: str, risk_percent: float, timeframe: str, trade_amount_usd
             logger.debug("%s: no signal", symbol)
             return
 
-        logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
-        alert_signal(symbol, signal)
+        # generate_signal() only returns long signals (spot-only bot).
+        # Guard here in case the function is called from other code paths.
+        if signal.side != "long":
+            logger.debug("%s: non-long signal skipped (spot only)", symbol)
+            return
 
+        logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
+
+        # BUG FIX: alert AFTER confirming the trade will be attempted,
+        # not before. This prevents confusing "SHORT signal!" alerts with
+        # no corresponding trade execution.
         trade = open_position(
             symbol, signal, risk_percent,
             trade_amount_usdt=trade_amount_usdt,
         )
+
+        # Only alert if we actually opened (or attempted to open) a trade
+        alert_signal(symbol, signal)
         if trade:
             alert_trade_opened(symbol, trade)
 
@@ -74,8 +90,6 @@ def trading_loop() -> None:
     while True:
         try:
             cfg = get_settings()
-
-            # Timeframe is now read dynamically from DB each cycle
             timeframe = cfg.timeframe or "15m"
 
             # Monitor existing trades for SL/TP hits
@@ -97,7 +111,6 @@ def trading_loop() -> None:
                 "trade_amount_usdt": cfg.trade_amount_usdt,
             })
 
-            # Only scan for new signals if trading is enabled
             if cfg.trading_enabled:
                 for pair in get_active_pairs():
                     scan_pair(
@@ -120,18 +133,10 @@ def trading_loop() -> None:
 
 def main() -> None:
     logger.info("=== SMC Bitget Bot starting ===")
-
-    # 1. Init DB
     init_db()
-
-    # 2. Health server (Railway port check)
     start_health_server()
-
-    # 3. Telegram bot (background thread)
     tg_app = build_app()
     run_bot_in_thread(tg_app)
-
-    # 4. Trading loop (main thread — blocks forever)
     trading_loop()
 
 

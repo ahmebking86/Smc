@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean, DateTime, Float, Integer, String, Text,
-    create_engine, select, update, func
+    create_engine, select, update, func, text
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -59,7 +59,6 @@ class BotSettings(Base):
     trading_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     risk_percent: Mapped[float] = mapped_column(Float, default=1.0)
     active_pairs: Mapped[str] = mapped_column(Text, default="BTC/USDT,ETH/USDT")
-    # ── New: fixed trade amount (USDT) and dynamic timeframe ──────────────────
     trade_amount_usdt: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
     timeframe: Mapped[str] = mapped_column(String(10), default="15m")
 
@@ -77,8 +76,37 @@ class BotLog(Base):
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 
+def _migrate_existing_schema(conn) -> None:
+    """
+    Add new columns to existing tables using ALTER TABLE.
+    create_all() only creates missing tables — it never adds columns.
+    Each statement is safe to run multiple times (IF NOT EXISTS).
+    """
+    migrations = [
+        # Add trade_amount_usdt to bot_settings if missing
+        """ALTER TABLE bot_settings
+           ADD COLUMN IF NOT EXISTS trade_amount_usdt DOUBLE PRECISION""",
+        # Add timeframe to bot_settings if missing
+        """ALTER TABLE bot_settings
+           ADD COLUMN IF NOT EXISTS timeframe VARCHAR(10) DEFAULT '15m'""",
+    ]
+    for stmt in migrations:
+        try:
+            conn.execute(text(stmt))
+        except Exception as exc:
+            # Column may already exist on non-Postgres DBs — log and continue
+            logger.debug("Migration skipped (%s): %s", exc, stmt)
+
+
 def init_db() -> None:
+    # 1. Create any completely missing tables
     Base.metadata.create_all(engine)
+
+    # 2. Add missing columns to existing tables (idempotent)
+    with engine.begin() as conn:
+        _migrate_existing_schema(conn)
+
+    # 3. Seed default settings row if absent
     with SessionLocal() as s:
         settings = s.get(BotSettings, 1)
         if settings is None:
@@ -92,22 +120,23 @@ def init_db() -> None:
                 timeframe=TIMEFRAME,
             ))
             s.commit()
-        else:
-            # Migrate existing rows that may lack the new columns
-            changed = False
-            if not hasattr(settings, "timeframe") or settings.timeframe is None:
-                settings.timeframe = "15m"
-                changed = True
-            if changed:
-                s.commit()
+            logger.info("Default settings row created")
+
     logger.info("Database initialised")
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
 
 def get_settings() -> BotSettings:
+    """Return the singleton settings row. Raises RuntimeError if not found."""
     with SessionLocal() as s:
-        return s.get(BotSettings, 1)
+        cfg = s.get(BotSettings, 1)
+        if cfg is None:
+            raise RuntimeError(
+                "BotSettings row (id=1) not found. "
+                "Did init_db() run successfully?"
+            )
+        return cfg
 
 
 def set_trading_enabled(enabled: bool) -> None:

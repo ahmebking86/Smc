@@ -1,4 +1,4 @@
-"""strategy/smc.py — Smart Money Concepts analysis.
+"""strategy/smc.py — Smart Money Concepts analysis (Spot LONG only).
 
 Detects:
   - Swing Highs / Swing Lows
@@ -7,11 +7,13 @@ Detects:
   - OB   (Order Block)
   - FVG  (Fair Value Gap)
 
-Returns a TradeSignal or None.
+Returns a TradeSignal(side='long') or None.
+SHORT signals are never returned — this bot trades spot only.
 """
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -54,7 +56,7 @@ class FVG:
 
 @dataclass
 class TradeSignal:
-    side: str            # 'long' | 'short'
+    side: str            # always 'long' (spot only)
     entry: float
     stop_loss: float
     take_profit: float
@@ -72,10 +74,8 @@ def detect_swings(df: pd.DataFrame, window: int = 5) -> list[SwingPoint]:
     n = len(df)
 
     for i in range(window, n - window):
-        # Swing high: highest in window on both sides
         if highs[i] == max(highs[i - window: i + window + 1]):
             swings.append(SwingPoint(index=i, price=highs[i], kind="high"))
-        # Swing low: lowest in window on both sides
         if lows[i] == min(lows[i - window: i + window + 1]):
             swings.append(SwingPoint(index=i, price=lows[i], kind="low"))
 
@@ -91,6 +91,9 @@ def detect_structure_events(
     """
     BOS  (continuation): price breaks beyond the LAST swing in the same direction.
     CHoCH (reversal):    price breaks beyond the LAST swing in the OPPOSITE direction.
+
+    Only BULLISH events are tracked (BOS_bull, CHoCH_bull) since this is a
+    spot-only bot that only takes long trades.
     """
     events: list[StructureEvent] = []
     closes = df["close"].values
@@ -99,25 +102,37 @@ def detect_structure_events(
     highs = [s for s in swings if s.kind == "high"]
     lows  = [s for s in swings if s.kind == "low"]
 
-    def last_before(lst: list[SwingPoint], idx: int) -> Optional[SwingPoint]:
-        candidates = [s for s in lst if s.index < idx]
-        return candidates[-1] if candidates else None
-
-    # Determine current trend from last two swings (simplified)
     if len(swings) < 4:
         return events
 
-    # Walk candles after enough swings exist
+    # Build pointer arrays for O(n) lookup instead of O(n²) list comprehensions
+    # hi_ptr[i] = index of last swing high with .index < i
+    hi_ptr: list[Optional[int]] = [None] * n
+    lo_ptr: list[Optional[int]] = [None] * n
+    hi_idx = 0
+    lo_idx = 0
+    last_hi: Optional[SwingPoint] = None
+    last_lo: Optional[SwingPoint] = None
+
+    for i in range(n):
+        while hi_idx < len(highs) and highs[hi_idx].index < i:
+            last_hi = highs[hi_idx]
+            hi_idx += 1
+        while lo_idx < len(lows) and lows[lo_idx].index < i:
+            last_lo = lows[lo_idx]
+            lo_idx += 1
+        hi_ptr[i] = last_hi
+        lo_ptr[i] = last_lo
+
     start = swings[3].index + 1
     for i in range(start, n):
         c = closes[i]
-        prev_high = last_before(highs, i)
-        prev_low  = last_before(lows, i)
-        if not prev_high or not prev_low:
+        prev_high: Optional[SwingPoint] = hi_ptr[i]
+        prev_low:  Optional[SwingPoint] = lo_ptr[i]
+        if prev_high is None or prev_low is None:
             continue
 
-        # Determine trend: higher highs + higher lows = bullish, else bearish
-        # Use last two swing highs and lows
+        # Get last 2 swing highs and lows before i for trend detection
         last2_highs = [s for s in highs if s.index < i][-2:]
         last2_lows  = [s for s in lows  if s.index < i][-2:]
 
@@ -130,25 +145,18 @@ def detect_structure_events(
             len(last2_lows)  == 2 and last2_lows[1].price  < last2_lows[0].price
         )
 
-        # BOS bullish: bullish trend, close breaks above last swing high
+        # BOS bullish — continuation of uptrend
         if bullish_trend and c > prev_high.price:
             if not events or events[-1].bar_index != i:
                 events.append(StructureEvent("BOS_bull", prev_high.price, i))
 
-        # BOS bearish: bearish trend, close breaks below last swing low
-        elif bearish_trend and c < prev_low.price:
-            if not events or events[-1].bar_index != i:
-                events.append(StructureEvent("BOS_bear", prev_low.price, i))
-
-        # CHoCH bullish: was bearish, but now breaks above last swing high
+        # CHoCH bullish — reversal: was bearish, now breaks above last swing high
         elif bearish_trend and c > prev_high.price:
             if not events or events[-1].bar_index != i:
                 events.append(StructureEvent("CHoCH_bull", prev_high.price, i))
 
-        # CHoCH bearish: was bullish, but now breaks below last swing low
-        elif bullish_trend and c < prev_low.price:
-            if not events or events[-1].bar_index != i:
-                events.append(StructureEvent("CHoCH_bear", prev_low.price, i))
+        # NOTE: BOS_bear and CHoCH_bear intentionally omitted —
+        # spot-only bot never opens short trades.
 
     return events
 
@@ -160,7 +168,6 @@ def detect_order_blocks(
 ) -> list[OrderBlock]:
     """
     Bullish OB: last BEARISH candle before a bullish BOS/CHoCH.
-    Bearish OB: last BULLISH candle before a bearish BOS/CHoCH.
     """
     obs: list[OrderBlock] = []
     opens  = df["open"].values
@@ -174,23 +181,10 @@ def detect_order_blocks(
             continue
 
         if ev.kind in ("BOS_bull", "CHoCH_bull"):
-            # Find last bearish candle before the event
             for j in range(idx - 1, max(0, idx - 20), -1):
                 if closes[j] < opens[j]:   # bearish candle
                     obs.append(OrderBlock(
                         kind="bull",
-                        top=highs[j],
-                        bottom=lows[j],
-                        bar_index=j,
-                    ))
-                    break
-
-        elif ev.kind in ("BOS_bear", "CHoCH_bear"):
-            # Find last bullish candle before the event
-            for j in range(idx - 1, max(0, idx - 20), -1):
-                if closes[j] > opens[j]:   # bullish candle
-                    obs.append(OrderBlock(
-                        kind="bear",
                         top=highs[j],
                         bottom=lows[j],
                         bar_index=j,
@@ -204,8 +198,7 @@ def detect_order_blocks(
 
 def detect_fvg(df: pd.DataFrame) -> list[FVG]:
     """
-    Bullish FVG: candle[i-1].high < candle[i+1].low  (gap up — price left an imbalance)
-    Bearish FVG: candle[i-1].low  > candle[i+1].high (gap down)
+    Bullish FVG: candle[i-1].high < candle[i+1].low  (gap up imbalance)
     """
     fvgs: list[FVG] = []
     highs = df["high"].values
@@ -213,7 +206,7 @@ def detect_fvg(df: pd.DataFrame) -> list[FVG]:
     n = len(df)
 
     for i in range(1, n - 1):
-        # Bullish FVG
+        # Bullish FVG only — spot long trades
         if highs[i - 1] < lows[i + 1]:
             fvgs.append(FVG(
                 kind="bull",
@@ -221,22 +214,18 @@ def detect_fvg(df: pd.DataFrame) -> list[FVG]:
                 bottom=highs[i - 1],
                 bar_index=i,
             ))
-        # Bearish FVG
-        elif lows[i - 1] > highs[i + 1]:
-            fvgs.append(FVG(
-                kind="bear",
-                top=lows[i - 1],
-                bottom=highs[i + 1],
-                bar_index=i,
-            ))
 
     return fvgs
 
 
-# ── Signal generator ──────────────────────────────────────────────────────────
+# ── ATR ───────────────────────────────────────────────────────────────────────
 
 def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    """Average True Range — used for SL buffer."""
+    """
+    Average True Range — used for SL buffer.
+    BUG FIX: returns NaN when period > len(df). Now falls back to a simple
+    high-low range average when the rolling mean is NaN.
+    """
     high = df["high"]
     low  = df["low"]
     close_prev = df["close"].shift(1)
@@ -245,19 +234,37 @@ def _atr(df: pd.DataFrame, period: int = 14) -> float:
         (high - close_prev).abs(),
         (low  - close_prev).abs(),
     ], axis=1).max(axis=1)
-    return float(tr.rolling(period).mean().iloc[-1])
 
+    atr_val = float(tr.rolling(period).mean().iloc[-1])
+
+    if math.isnan(atr_val):
+        # Fallback: mean of all available true range values
+        atr_val = float(tr.mean())
+        logger.debug("ATR rolling mean was NaN — using full-window mean %.6f", atr_val)
+
+    if math.isnan(atr_val) or atr_val <= 0:
+        # Last resort: 0.1% of current close
+        atr_val = float(df["close"].iloc[-1]) * 0.001
+        logger.debug("ATR fallback to 0.1%% of close: %.6f", atr_val)
+
+    return atr_val
+
+
+# ── Signal generator ──────────────────────────────────────────────────────────
 
 def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
     """
-    Combine BOS / CHoCH → OB / FVG to produce a trade signal.
+    Combine BOS / CHoCH → OB / FVG to produce a LONG trade signal.
 
     Logic:
-      1. Detect latest structure event (BOS or CHoCH).
-      2. Find the nearest OB or FVG that aligns with the signal direction.
-      3. Entry = midpoint of OB/FVG zone.
-      4. SL    = 1 ATR beyond the OB/FVG zone extremity.
-      5. TP    = entry ± (SL distance × RR).
+      1. Detect latest BULLISH structure event (BOS_bull or CHoCH_bull).
+      2. Find the nearest bullish OB or FVG.
+      3. Entry = midpoint of zone.
+      4. SL    = 1 ATR below zone bottom.
+      5. TP    = entry + (SL distance × RR).
+
+    Returns None (no signal) or TradeSignal(side='long').
+    SHORT signals are never produced — this is a spot-only bot.
     """
     if len(df) < 50:
         return None
@@ -273,17 +280,16 @@ def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
         logger.warning("SMC analysis error: %s", exc)
         return None
 
+    # Only bullish events remain (bearish filtered in detect_structure_events)
     if not events:
         return None
 
     last_event = events[-1]
-    direction  = "long" if "bull" in last_event.kind else "short"
 
-    # ── Try Order Block first ──────────────────────────────────────────────────
+    # ── Bullish OB first ───────────────────────────────────────────────────────
     aligned_obs = [
         ob for ob in obs
-        if ob.kind == ("bull" if direction == "long" else "bear")
-        and ob.bar_index > len(df) - 50   # recent OBs only
+        if ob.kind == "bull" and ob.bar_index > len(df) - 50
     ]
 
     zone_top = zone_bottom = None
@@ -295,11 +301,9 @@ def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
         zone_bottom = ob.bottom
         signal_components.append("OB")
     else:
-        # Fall back to FVG
         aligned_fvgs = [
             fvg for fvg in fvgs
-            if fvg.kind == ("bull" if direction == "long" else "bear")
-            and fvg.bar_index > len(df) - 50
+            if fvg.kind == "bull" and fvg.bar_index > len(df) - 50
         ]
         if aligned_fvgs:
             fvg = aligned_fvgs[-1]
@@ -311,21 +315,21 @@ def generate_signal(df: pd.DataFrame, rr: float = 2.0) -> Optional[TradeSignal]:
         return None
 
     entry = (zone_top + zone_bottom) / 2
+    sl    = zone_bottom - atr_val
+    tp    = entry + (entry - sl) * rr
 
-    if direction == "long":
-        sl = zone_bottom - atr_val
-        tp = entry + (entry - sl) * rr
-        # Only signal if price is near or inside the zone (entry is valid)
-        if current_price > zone_top * 1.01:   # price already above zone, stale
-            return None
-    else:
-        sl = zone_top + atr_val
-        tp = entry - (sl - entry) * rr
-        if current_price < zone_bottom * 0.99:
-            return None
+    # Validate: SL must be below entry, TP above entry
+    if sl >= entry or tp <= entry:
+        logger.debug("Invalid SL/TP geometry — skipping signal")
+        return None
+
+    # Stale zone check: price already well above zone
+    if current_price > zone_top * 1.01:
+        logger.debug("Price %.6f already above zone %.6f — stale, skipping", current_price, zone_top)
+        return None
 
     return TradeSignal(
-        side=direction,
+        side="long",
         entry=round(entry, 6),
         stop_loss=round(sl, 6),
         take_profit=round(tp, 6),
