@@ -171,8 +171,8 @@ def open_position(
             # For Bitget market buy with specific qty, we still need to pass price
             # but it's safer to convert to cost (qty * entry) and use market_buy
             cost = qty * signal.entry
-            if cost < 5.0:
-                logger.warning("Cost %.2f below Bitget minimum 5 USDT — skipping %s", cost, symbol)
+            if cost < 2.0:
+                logger.warning("Cost %.2f below minimum 2 USDT — skipping %s", cost, symbol)
                 return None
             order = ex.create_market_buy_order(symbol, cost)
             qty = float(order.get('filled', 0) or order.get('amount', 0))
