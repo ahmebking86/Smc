@@ -58,7 +58,7 @@ _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS portfolios (
     id                    TEXT        PRIMARY KEY,
     total_investment      NUMERIC     NOT NULL,
-    rebalance_mode        TEXT        NOT NULL,   -- 'time' | 'percent'
+    rebalance_mode        TEXT        NOT NULL,
     interval_hours        NUMERIC     NOT NULL DEFAULT 0,
     threshold_pct         NUMERIC     NOT NULL DEFAULT 0,
     status                TEXT        NOT NULL DEFAULT 'active',
@@ -82,16 +82,11 @@ CREATE TABLE IF NOT EXISTS rebalance_trades (
     id              TEXT        PRIMARY KEY,
     portfolio_id    TEXT        NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
     symbol          TEXT        NOT NULL,
-    side            TEXT        NOT NULL,   -- buy | sell
+    side            TEXT        NOT NULL,
     usdt_amount     NUMERIC     NOT NULL,
     qty             NUMERIC     NOT NULL DEFAULT 0,
     price           NUMERIC     NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS bot_settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_portfolios_status ON portfolios(status);
@@ -105,6 +100,25 @@ def init_db() -> None:
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
+            # ── Fix bot_settings: old table may lack "value" column ──────────
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'bot_settings'
+            """)
+            cols = {r[0] for r in cur.fetchall()}
+            if cols and "value" not in cols:
+                logger.warning("bot_settings has wrong schema %s — recreating", cols)
+                cur.execute("DROP TABLE IF EXISTS bot_settings CASCADE")
+                cols = set()
+            if not cols:
+                cur.execute("""
+                    CREATE TABLE bot_settings (
+                        key   TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                """)
+                logger.info("✅ جدول bot_settings أُنشئ/أُصلح.")
+
             cur.execute(_CREATE_TABLES_SQL)
         conn.commit()
         logger.info("✅ قاعدة البيانات جاهزة.")
@@ -206,7 +220,6 @@ def get_portfolio_trades(portfolio_id: str) -> list[dict]:
 
 
 def portfolio_total_pnl(portfolio_id: str) -> float:
-    """Approximate PnL: sum of sells - sum of buys (simplified)."""
     row = _exec(
         """
         SELECT
@@ -233,5 +246,9 @@ def set_setting(key: str, value: str) -> None:
 
 
 def get_setting(key: str) -> Optional[str]:
-    row = _exec("SELECT value FROM bot_settings WHERE key = %s", (key,), fetch="one")
-    return row["value"] if row else None
+    try:
+        row = _exec("SELECT value FROM bot_settings WHERE key = %s", (key,), fetch="one")
+        return row["value"] if row else None
+    except Exception as e:
+        logger.warning("get_setting(%s) failed: %s — returning None", key, e)
+        return None
