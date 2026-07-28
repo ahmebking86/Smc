@@ -26,5 +26,6 @@ BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
 BITGET_BASE_URL   = "https://api.bitget.com"
 
 # ── App ───────────────────────────────────────────────────────────────────────
-MONITOR_INTERVAL   = 5        # seconds between price checks (fast tracking)
-MIN_ENTRY_AMOUNT   = 1.0      # minimum USDT per grid level
+MONITOR_INTERVAL   = 30       # seconds between rebalance checks
+MIN_ORDER_USDT     = 1.5      # minimum USDT for any market order (safety buffer)
+MAX_ASSETS         = 20       # max coins in one portfolio
