@@ -1,44 +1,30 @@
-"""config.py — All settings from environment variables."""
 import os
+import sys
+from dotenv import load_dotenv
 
-# BUG FIX: load_dotenv() was missing — .env files never loaded for local dev.
-# python-dotenv was in requirements.txt but never called.
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # dotenv not installed — production env vars come from the host
+load_dotenv()
 
-
-def _require(key: str) -> str:
-    val = os.environ.get(key, "").strip()
+def _require(name: str) -> str:
+    val = os.environ.get(name, "").strip()
     if not val:
-        raise RuntimeError(f"Missing required env var: {key}")
+        print(f"[FATAL] المتغير '{name}' غير معرّف أو فارغ في بيئة التشغيل.", file=sys.stderr)
+        print(f"        أضفه في Railway → Variables أو في ملف .env المحلي.", file=sys.stderr)
+        sys.exit(1)
     return val
 
-
 # ── Telegram ──────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID: int = int(_require("TELEGRAM_CHAT_ID"))
+TELEGRAM_TOKEN   = _require("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = int(_require("TELEGRAM_CHAT_ID"))
 
-# ── Bitget ────────────────────────────────────────────────────────────────────
-BITGET_API_KEY: str = _require("BITGET_API_KEY")
-BITGET_SECRET: str = _require("BITGET_SECRET")
-BITGET_PASSPHRASE: str = _require("BITGET_PASSPHRASE")
+# ── PostgreSQL (Railway) ───────────────────────────────────────────────────────
+DATABASE_URL = _require("DATABASE_URL")
 
-# ── Database ──────────────────────────────────────────────────────────────────
-DATABASE_URL: str = _require("DATABASE_URL")
+# ── BitGet API ────────────────────────────────────────────────────────────────
+BITGET_API_KEY    = os.getenv("BITGET_API_KEY", "")
+BITGET_API_SECRET = os.getenv("BITGET_API_SECRET", "")
+BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
+BITGET_BASE_URL   = "https://api.bitget.com"
 
-# ── Bot defaults (overridden by DB settings at runtime) ───────────────────────
-DEFAULT_RISK_PERCENT: float = float(os.environ.get("DEFAULT_RISK_PCT", "1.0"))
-DEFAULT_PAIRS: list[str] = [
-    p.strip() for p in os.environ.get("DEFAULT_PAIRS", "BTC/USDT,ETH/USDT").split(",")
-]
-
-# ── Strategy ──────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SECONDS: int = int(os.environ.get("SCAN_INTERVAL_SECONDS", "60"))
-TIMEFRAME: str = os.environ.get("TIMEFRAME", "15m")   # default only — DB overrides at runtime
-KLINE_LIMIT: int = int(os.environ.get("KLINE_LIMIT", "200"))
-
-# ── Health server ─────────────────────────────────────────────────────────────
-PORT: int = int(os.environ.get("PORT", "8080"))
+# ── App ───────────────────────────────────────────────────────────────────────
+MONITOR_INTERVAL   = 5        # seconds between price checks (fast tracking)
+MIN_ENTRY_AMOUNT   = 1.0      # minimum USDT per grid level

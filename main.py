@@ -1,193 +1,94 @@
-"""main.py — Entry point: starts health server, Telegram bot, and trading loop."""
-from __future__ import annotations
+"""
+Entry point — starts the Telegram bot and background monitor.
+"""
 
+import asyncio
 import logging
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
+import warnings
 
-import pandas as pd
+from telegram.warnings import PTBUserWarning
+warnings.filterwarnings("ignore", category=PTBUserWarning)
 
-from config import SCAN_INTERVAL_SECONDS, KLINE_LIMIT
-from database import init_db, get_settings, get_active_pairs
-from health import start_health_server, set_status
-from strategy.smc import generate_signal
-from telegram_bot import (
-    build_app, run_bot_in_thread,
-    alert_signal, alert_trade_opened, alert_trade_closed, alert_error,
-)
-from trading.executor import (
-    fetch_ohlcv, open_position, monitor_open_trades, fetch_usdt_balance,
-)
+from telegram.error import Conflict
+from telegram.ext import Application, ContextTypes
+
+from config import TELEGRAM_TOKEN
+from bot.handlers import build_application
+import database.db as db
+from trading.grid_engine import get_engine
+from trading.monitor import monitor_loop
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger("main")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
-# ── Signal cooldown ───────────────────────────────────────────────────────────
-# Prevents duplicate alerts when the same candle pattern persists across
-# multiple 60-second scan cycles.
-SIGNAL_COOLDOWN_SECONDS = 60    # Reduced to 1 minute to be more responsive
-_last_signal_time: dict[str, float] = {}
+logger = logging.getLogger(__name__)
 
 
-def _is_on_cooldown(symbol: str) -> bool:
-    last = _last_signal_time.get(symbol, 0.0)
-    return (time.monotonic() - last) < SIGNAL_COOLDOWN_SECONDS
-
-
-def _mark_signal_sent(symbol: str) -> None:
-    _last_signal_time[symbol] = time.monotonic()
-
-
-# ── OHLCV → DataFrame ─────────────────────────────────────────────────────────
-
-def ohlcv_to_df(raw: list) -> pd.DataFrame:
-    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    for col in ("open", "high", "low", "close", "volume"):
-        df[col] = df[col].astype(float)
-    return df.reset_index(drop=True)
-
-
-# ── Single pair scan (runs in thread pool) ────────────────────────────────────
-
-def scan_pair(
-    symbol: str,
-    risk_percent: float,
-    timeframe: str,
-    trade_amount_usdt=None,
-) -> None:
-    logger.debug("Scanning %s  tf=%s", symbol, timeframe)
-
-    if _is_on_cooldown(symbol):
-        logger.debug("%s: on signal cooldown, skipping", symbol)
-        return
-
+async def post_init(app: Application) -> None:
+    """Called after the bot is initialised — start the monitor task."""
+    # إنشاء الجداول + تطبيق migrations تلقائياً عند كل بدء تشغيل (idempotent)
     try:
-        raw = fetch_ohlcv(symbol, timeframe, KLINE_LIMIT)
-        if not raw or len(raw) < 50:
-            logger.warning("%s: not enough candles (%d)", symbol, len(raw) if raw else 0)
-            return
-
-        df = ohlcv_to_df(raw)
-        signal = generate_signal(df)
-
-        if signal is None:
-            logger.debug("%s: no signal", symbol)
-            return
-
-        if signal.side != "long":
-            logger.debug("%s: non-long signal skipped (spot only)", symbol)
-            return
-
-        logger.info("%s: signal %s %s", symbol, signal.side, signal.signal_type)
-
-        # Open position FIRST
-        trade = open_position(
-            symbol, signal, risk_percent,
-            trade_amount_usdt=trade_amount_usdt,
-        )
-
-        # ONLY alert if a trade was actually opened on the exchange
-        if trade:
-            _mark_signal_sent(symbol)
-            alert_trade_opened(symbol, trade)
-        else:
-            # We don't send an alert here because failure alerts are now handled
-            # inside the executor.open_position logic for better detail.
-            logger.debug("%s: signal detected but trade not opened", symbol)
-
+        db.init_db()
+    except Exception as m_exc:
+        logger.critical("❌ فشل تهيئة قاعدة البيانات: %s", m_exc)
+        raise
+    engine = get_engine()
+    try:
+        engine.load_from_db()
     except Exception as exc:
-        logger.error("scan_pair(%s): %s", symbol, exc)
-        alert_error(f"scan_pair({symbol})", exc)
-
-
-# ── Main trading loop ─────────────────────────────────────────────────────────
-
-# Max parallel OHLCV requests — Bitget rate-limits are generous for spot,
-# but keep threads conservative to avoid connection pool exhaustion.
-MAX_SCAN_WORKERS = 8
-
-
-def trading_loop() -> None:
-    logger.info("Trading loop started  interval=%ds  max_workers=%d",
-                SCAN_INTERVAL_SECONDS, MAX_SCAN_WORKERS)
-
-    while True:
-        loop_start = time.monotonic()
+        logger.critical(
+            "❌ فشل تحميل الجلسات من قاعدة البيانات عند البدء: %s\n"
+            "   تحقق من متغير DATABASE_URL في Railway.",
+            exc,
+        )
+        raise  # أوقف البوت — لا فائدة من التشغيل بقاعدة بيانات معطلة
+    def _monitor_done(task: asyncio.Task) -> None:
         try:
-            cfg = get_settings()
-            timeframe = cfg.timeframe or "15m"
-
-            # Monitor existing trades for SL/TP hits
-            alerts = monitor_open_trades()
-            for a in alerts:
-                alert_trade_closed(a["trade"], a["price"], a["pnl"], a["reason"])
-
-            # Update health endpoint
-            try:
-                balance = fetch_usdt_balance()
-            except Exception:
-                balance = 0.0
-
-            pairs = get_active_pairs()
-
-            set_status({
-                "trading_enabled": cfg.trading_enabled,
-                "balance_usdt": round(balance, 2),
-                "active_pairs": pairs,
-                "pair_count": len(pairs),
-                "timeframe": timeframe,
-                "trade_amount_usdt": cfg.trade_amount_usdt,
-            })
-
-            if cfg.trading_enabled:
-                # ── Parallel scan for up to 50 pairs ─────────────────────────
-                # Each pair's OHLCV fetch is I/O-bound; threads let us fetch
-                # all 50 pairs in ~the time of the slowest single fetch instead
-                # of 50× sequential fetches.
-                with ThreadPoolExecutor(max_workers=MAX_SCAN_WORKERS) as pool:
-                    futures = {
-                        pool.submit(
-                            scan_pair, pair, cfg.risk_percent, timeframe,
-                            cfg.trade_amount_usdt
-                        ): pair
-                        for pair in pairs
-                    }
-                    # Use a shorter timeout to prevent the loop from hanging
-                    try:
-                        for fut in as_completed(futures, timeout=45):
-                            pair = futures[fut]
-                            try:
-                                fut.result()
-                            except Exception as exc:
-                                logger.error("scan worker %s raised: %s", pair, exc)
-                    except TimeoutError:
-                        logger.warning("Scan cycle timed out — some pairs skipped")
-            else:
-                logger.info("Trading paused — skipping scan")
-
+            task.result()
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
-            logger.exception("Unexpected error in trading loop: %s", exc)
-            alert_error("trading_loop", exc)
+            logger.critical("❌ monitor_loop انهار: %s — البوت لن يتابع الجلسات!", exc)
 
-        # Sleep the remainder of the interval (accounts for scan time)
-        elapsed = time.monotonic() - loop_start
-        sleep_for = max(0.0, SCAN_INTERVAL_SECONDS - elapsed)
-        logger.debug("Loop finished in %.1fs — sleeping %.1fs", elapsed, sleep_for)
-        time.sleep(sleep_for)
+    _task = asyncio.create_task(monitor_loop(app.bot))
+    _task.add_done_callback(_monitor_done)
+    logger.info("✅ البوت يعمل. %d شبكة محملة من قاعدة البيانات.", len(engine._sessions))
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    FIX: بدون هذا الـ handler، أي خطأ غير معالج (مثل Conflict عند إعادة تشغيل
+    الـ container) يتسبب في تعطل البوت وإعادة تشغيله في حلقة لا نهائية.
+    Conflict يحدث عندما تكون نسختان من البوت شغّالتين في نفس الوقت لثوانٍ
+    (مثلاً عند إعادة نشر Railway) — نتجاهله ونتركه يُعيد الاتصال تلقائياً.
+    """
+    if isinstance(context.error, Conflict):
+        logger.warning(
+            "⚠️ Telegram Conflict — نسخة أخرى من البوت موصولة حالياً. "
+            "ستُعيد المكتبة المحاولة تلقائياً."
+        )
+        return
+    logger.error("خطأ غير معالج: %s", context.error, exc_info=context.error)
+
 
 def main() -> None:
-    logger.info("=== SMC Bitget Bot starting ===")
-    init_db()
-    start_health_server()
-    tg_app = build_app()
-    run_bot_in_thread(tg_app)
-    trading_loop()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+    build_application(app)
+    app.add_error_handler(error_handler)
+
+    logger.info("Starting polling…")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
