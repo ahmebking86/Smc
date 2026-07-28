@@ -1,7 +1,5 @@
 """
-PostgreSQL database layer — all CRUD for grid sessions, orders, trades.
-Uses psycopg2-binary + ThreadedConnectionPool for thread-safe access.
-Tables are created automatically on first startup via init_db().
+PostgreSQL database layer — portfolios, assets, trades, settings.
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-# ── Connection pool ───────────────────────────────────────────────────────────
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
 
@@ -36,9 +33,8 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
 def _exec(
     sql: str,
     params: tuple | None = None,
-    fetch: str = "none",   # "none" | "one" | "all"
+    fetch: str = "none",
 ) -> Any:
-    """Execute a SQL statement and optionally return rows as dicts."""
     pool = _get_pool()
     conn = pool.getconn()
     try:
@@ -58,60 +54,39 @@ def _exec(
         pool.putconn(conn)
 
 
-# ── Schema SQL ────────────────────────────────────────────────────────────────
 _CREATE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS grid_sessions (
-    id                TEXT        PRIMARY KEY,
-    symbol            TEXT        NOT NULL,
-    entry_amount      NUMERIC     NOT NULL,
-    upper_pct         NUMERIC     NOT NULL DEFAULT 0,
-    lower_pct         NUMERIC     NOT NULL DEFAULT 0,
-    grid_count        INTEGER     NOT NULL DEFAULT 0,
-    step_pct          NUMERIC     NOT NULL DEFAULT 0,
-    levels_per_side   INTEGER     NOT NULL DEFAULT 0,
-    lower_limit_price NUMERIC     NOT NULL DEFAULT 0,
-    upper_limit_price NUMERIC     NOT NULL DEFAULT 0,
-    profit_target     NUMERIC     NOT NULL DEFAULT 0,
-    stop_loss         NUMERIC     NOT NULL DEFAULT 0,
-    base_price        NUMERIC     NOT NULL,
-    upper_price       NUMERIC     NOT NULL,
-    lower_price       NUMERIC     NOT NULL,
-    status            TEXT        NOT NULL DEFAULT 'active',
-    total_pnl         NUMERIC     NOT NULL DEFAULT 0,
-    depth             INTEGER     NOT NULL DEFAULT 0,
-    parent_id         TEXT        REFERENCES grid_sessions(id),
-    trailing_stop     BOOLEAN     NOT NULL DEFAULT FALSE,
-    trailing_pct      NUMERIC     NOT NULL DEFAULT 0,
-    group_id          TEXT        DEFAULT NULL,
-    pump_enabled      BOOLEAN     NOT NULL DEFAULT FALSE,
-    pump_detect_pct   NUMERIC     NOT NULL DEFAULT 10,
-    pump_trailing_pct NUMERIC     NOT NULL DEFAULT 2,
-    pump_budget       NUMERIC     NOT NULL DEFAULT 0,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at         TIMESTAMPTZ
+CREATE TABLE IF NOT EXISTS portfolios (
+    id                    TEXT        PRIMARY KEY,
+    total_investment      NUMERIC     NOT NULL,
+    rebalance_mode        TEXT        NOT NULL,   -- 'time' | 'percent'
+    interval_hours        NUMERIC     NOT NULL DEFAULT 0,
+    threshold_pct         NUMERIC     NOT NULL DEFAULT 0,
+    status                TEXT        NOT NULL DEFAULT 'active',
+    total_pnl             NUMERIC     NOT NULL DEFAULT 0,
+    last_rebalance_at     TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    closed_at             TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS grid_orders (
-    id          TEXT        PRIMARY KEY,
-    session_id  TEXT        NOT NULL REFERENCES grid_sessions(id) ON DELETE CASCADE,
-    order_id    TEXT,
-    side        TEXT        NOT NULL,
-    price       NUMERIC     NOT NULL,
-    qty         NUMERIC     NOT NULL,
-    status      TEXT        NOT NULL DEFAULT 'open',
-    entry_price NUMERIC,
-    filled_at   TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS portfolio_assets (
+    id              TEXT        PRIMARY KEY,
+    portfolio_id    TEXT        NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    symbol          TEXT        NOT NULL,
+    target_pct      NUMERIC     NOT NULL,
+    initial_qty     NUMERIC     NOT NULL DEFAULT 0,
+    status          TEXT        NOT NULL DEFAULT 'active',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS grid_trades (
-    id          TEXT        PRIMARY KEY,
-    session_id  TEXT        NOT NULL REFERENCES grid_sessions(id) ON DELETE CASCADE,
-    buy_price   NUMERIC     NOT NULL,
-    sell_price  NUMERIC     NOT NULL,
-    qty         NUMERIC     NOT NULL,
-    pnl         NUMERIC     NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS rebalance_trades (
+    id              TEXT        PRIMARY KEY,
+    portfolio_id    TEXT        NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    symbol          TEXT        NOT NULL,
+    side            TEXT        NOT NULL,   -- buy | sell
+    usdt_amount     NUMERIC     NOT NULL,
+    qty             NUMERIC     NOT NULL DEFAULT 0,
+    price           NUMERIC     NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS bot_settings (
@@ -119,50 +94,20 @@ CREATE TABLE IF NOT EXISTS bot_settings (
     value TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_status ON grid_sessions(status);
-CREATE INDEX IF NOT EXISTS idx_sessions_group  ON grid_sessions(group_id);
-CREATE INDEX IF NOT EXISTS idx_orders_session  ON grid_orders(session_id);
-CREATE INDEX IF NOT EXISTS idx_orders_status   ON grid_orders(status);
-CREATE INDEX IF NOT EXISTS idx_trades_session  ON grid_trades(session_id);
+CREATE INDEX IF NOT EXISTS idx_portfolios_status ON portfolios(status);
+CREATE INDEX IF NOT EXISTS idx_assets_portfolio  ON portfolio_assets(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_trades_portfolio  ON rebalance_trades(portfolio_id);
 """
-
-# Migrations for databases that were created before the full schema above.
-# Every statement is idempotent (ADD COLUMN IF NOT EXISTS).
-_MIGRATIONS = [
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS trailing_stop       BOOLEAN  NOT NULL DEFAULT FALSE",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS trailing_pct        NUMERIC  NOT NULL DEFAULT 0",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS group_id            TEXT     DEFAULT NULL",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS step_pct            NUMERIC  NOT NULL DEFAULT 0",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS levels_per_side     INTEGER  NOT NULL DEFAULT 0",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS lower_limit_price   NUMERIC  NOT NULL DEFAULT 0",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS upper_limit_price   NUMERIC  NOT NULL DEFAULT 0",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS pump_enabled        BOOLEAN  NOT NULL DEFAULT FALSE",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS pump_detect_pct     NUMERIC  NOT NULL DEFAULT 10",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS pump_trailing_pct   NUMERIC  NOT NULL DEFAULT 2",
-    "ALTER TABLE grid_sessions ADD COLUMN IF NOT EXISTS pump_budget         NUMERIC  NOT NULL DEFAULT 0",
-    "ALTER TABLE grid_orders   ADD COLUMN IF NOT EXISTS entry_price         NUMERIC",
-    "CREATE INDEX IF NOT EXISTS idx_sessions_group ON grid_sessions(group_id)",
-]
 
 
 def init_db() -> None:
-    """Create tables and run migrations. Call once at bot startup."""
     pool = _get_pool()
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
             cur.execute(_CREATE_TABLES_SQL)
-            for sql in _MIGRATIONS:
-                try:
-                    cur.execute(sql)
-                except Exception as e:
-                    logger.warning("Migration skipped: %s | %s", sql[:60], e)
-                    conn.rollback()
-                    # Re-open cursor after rollback
-                    cur.close()
-                    cur = conn.cursor()
         conn.commit()
-        logger.info("✅ قاعدة البيانات جاهزة (جداول + migrations).")
+        logger.info("✅ قاعدة البيانات جاهزة.")
     except Exception as exc:
         conn.rollback()
         logger.critical("❌ فشل تهيئة قاعدة البيانات: %s", exc)
@@ -171,116 +116,106 @@ def init_db() -> None:
         pool.putconn(conn)
 
 
-# ── Sessions ──────────────────────────────────────────────────────────────────
+# ── Portfolios ────────────────────────────────────────────────────────────────
 
-def create_session(data: dict) -> dict:
-    cols   = ", ".join(data.keys())
+def create_portfolio(data: dict) -> dict:
+    cols = ", ".join(data.keys())
     placeholders = ", ".join(["%s"] * len(data))
-    sql    = f"INSERT INTO grid_sessions ({cols}) VALUES ({placeholders}) RETURNING *"
-    row    = _exec(sql, tuple(data.values()), fetch="one")
+    sql = f"INSERT INTO portfolios ({cols}) VALUES ({placeholders}) RETURNING *"
+    row = _exec(sql, tuple(data.values()), fetch="one")
     if not row:
-        raise RuntimeError(f"create_session failed — no row returned. data={data!r}")
+        raise RuntimeError(f"create_portfolio failed: {data!r}")
     return row
 
 
-def get_session(session_id: str) -> Optional[dict]:
-    return _exec(
-        "SELECT * FROM grid_sessions WHERE id = %s",
-        (session_id,), fetch="one",
-    )
+def get_portfolio(portfolio_id: str) -> Optional[dict]:
+    return _exec("SELECT * FROM portfolios WHERE id = %s", (portfolio_id,), fetch="one")
 
 
-def list_active_sessions() -> list[dict]:
-    """Returns active + paused sessions (both loaded into engine on startup)."""
+def list_active_portfolios() -> list[dict]:
     return _exec(
-        "SELECT * FROM grid_sessions WHERE status IN ('active','paused') ORDER BY created_at DESC",
+        "SELECT * FROM portfolios WHERE status IN ('active','paused') ORDER BY created_at DESC",
         fetch="all",
     ) or []
 
 
-def list_all_sessions(limit: int = 20) -> list[dict]:
-    return _exec(
-        "SELECT * FROM grid_sessions ORDER BY created_at DESC LIMIT %s",
-        (limit,), fetch="all",
-    ) or []
-
-
-def update_session(session_id: str, data: dict) -> dict:
+def update_portfolio(portfolio_id: str, data: dict) -> dict:
     if not data:
-        return get_session(session_id) or {}
+        return get_portfolio(portfolio_id) or {}
     set_clause = ", ".join(f"{k} = %s" for k in data.keys())
-    sql  = f"UPDATE grid_sessions SET {set_clause} WHERE id = %s RETURNING *"
-    row  = _exec(sql, (*data.values(), session_id), fetch="one")
+    sql = f"UPDATE portfolios SET {set_clause} WHERE id = %s RETURNING *"
+    row = _exec(sql, (*data.values(), portfolio_id), fetch="one")
     return row or {}
 
 
-def close_session(session_id: str, pnl: float) -> None:
-    update_session(session_id, {
+def close_portfolio(portfolio_id: str, pnl: float) -> None:
+    update_portfolio(portfolio_id, {
         "status":    "closed",
         "total_pnl": pnl,
         "closed_at": datetime.now(timezone.utc).isoformat(),
     })
 
 
-# ── Orders ────────────────────────────────────────────────────────────────────
+# ── Assets ────────────────────────────────────────────────────────────────────
 
-def create_order(data: dict) -> dict:
-    cols         = ", ".join(data.keys())
+def create_asset(data: dict) -> dict:
+    cols = ", ".join(data.keys())
     placeholders = ", ".join(["%s"] * len(data))
-    sql          = f"INSERT INTO grid_orders ({cols}) VALUES ({placeholders}) RETURNING *"
-    row          = _exec(sql, tuple(data.values()), fetch="one")
+    sql = f"INSERT INTO portfolio_assets ({cols}) VALUES ({placeholders}) RETURNING *"
+    row = _exec(sql, tuple(data.values()), fetch="one")
     if not row:
-        raise RuntimeError(f"create_order failed — no row returned. data={data!r}")
+        raise RuntimeError(f"create_asset failed: {data!r}")
     return row
 
 
-def get_session_orders(session_id: str) -> list[dict]:
+def get_portfolio_assets(portfolio_id: str) -> list[dict]:
     return _exec(
-        "SELECT * FROM grid_orders WHERE session_id = %s ORDER BY price",
-        (session_id,), fetch="all",
+        "SELECT * FROM portfolio_assets WHERE portfolio_id = %s AND status = 'active' ORDER BY target_pct DESC",
+        (portfolio_id,), fetch="all",
     ) or []
 
 
-def update_order(order_id: str, data: dict) -> None:
+def update_asset(asset_id: str, data: dict) -> None:
     if not data:
         return
     set_clause = ", ".join(f"{k} = %s" for k in data.keys())
-    _exec(
-        f"UPDATE grid_orders SET {set_clause} WHERE id = %s",
-        (*data.values(), order_id),
-    )
+    _exec(f"UPDATE portfolio_assets SET {set_clause} WHERE id = %s", (*data.values(), asset_id))
 
 
-def cancel_session_orders(session_id: str) -> None:
-    _exec(
-        "UPDATE grid_orders SET status = 'cancelled' WHERE session_id = %s AND status = 'open'",
-        (session_id,),
-    )
+def deactivate_asset(asset_id: str) -> None:
+    update_asset(asset_id, {"status": "closed"})
 
 
 # ── Trades ────────────────────────────────────────────────────────────────────
 
 def create_trade(data: dict) -> dict:
-    cols         = ", ".join(data.keys())
+    cols = ", ".join(data.keys())
     placeholders = ", ".join(["%s"] * len(data))
-    sql          = f"INSERT INTO grid_trades ({cols}) VALUES ({placeholders}) RETURNING *"
-    row          = _exec(sql, tuple(data.values()), fetch="one")
+    sql = f"INSERT INTO rebalance_trades ({cols}) VALUES ({placeholders}) RETURNING *"
+    row = _exec(sql, tuple(data.values()), fetch="one")
     if not row:
-        raise RuntimeError(f"create_trade failed — no row returned. data={data!r}")
+        raise RuntimeError(f"create_trade failed: {data!r}")
     return row
 
 
-def get_session_trades(session_id: str) -> list[dict]:
+def get_portfolio_trades(portfolio_id: str) -> list[dict]:
     return _exec(
-        "SELECT * FROM grid_trades WHERE session_id = %s ORDER BY created_at DESC",
-        (session_id,), fetch="all",
+        "SELECT * FROM rebalance_trades WHERE portfolio_id = %s ORDER BY created_at DESC",
+        (portfolio_id,), fetch="all",
     ) or []
 
 
-def session_total_pnl(session_id: str) -> float:
+def portfolio_total_pnl(portfolio_id: str) -> float:
+    """Approximate PnL: sum of sells - sum of buys (simplified)."""
     row = _exec(
-        "SELECT COALESCE(SUM(pnl), 0) AS total FROM grid_trades WHERE session_id = %s",
-        (session_id,), fetch="one",
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN side = 'sell' THEN usdt_amount ELSE 0 END), 0)
+          - COALESCE(SUM(CASE WHEN side = 'buy'  THEN usdt_amount ELSE 0 END), 0)
+          AS total
+        FROM rebalance_trades WHERE portfolio_id = %s
+        """,
+        (portfolio_id,), fetch="one",
     )
     return float(row["total"]) if row else 0.0
 
@@ -298,32 +233,5 @@ def set_setting(key: str, value: str) -> None:
 
 
 def get_setting(key: str) -> Optional[str]:
-    row = _exec(
-        "SELECT value FROM bot_settings WHERE key = %s",
-        (key,), fetch="one",
-    )
+    row = _exec("SELECT value FROM bot_settings WHERE key = %s", (key,), fetch="one")
     return row["value"] if row else None
-
-
-# ── Templates ─────────────────────────────────────────────────────────────────
-
-def save_template(name: str, cfg: dict) -> None:
-    import json
-    raw = get_setting("grid_templates")
-    templates: list = json.loads(raw) if raw else []
-    templates = [t for t in templates if t["name"] != name]
-    cfg["name"] = name
-    templates.append(cfg)
-    set_setting("grid_templates", json.dumps(templates, ensure_ascii=False))
-
-
-def get_templates() -> list[dict]:
-    import json
-    raw = get_setting("grid_templates")
-    return json.loads(raw) if raw else []
-
-
-def delete_template(name: str) -> None:
-    import json
-    templates = [t for t in get_templates() if t["name"] != name]
-    set_setting("grid_templates", json.dumps(templates, ensure_ascii=False))
