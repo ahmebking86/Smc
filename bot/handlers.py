@@ -229,11 +229,12 @@ async def got_total_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
 
     await update.message.reply_text(
         f"✅ المبلغ: <b>{val:.2f} USDT</b>\n\n"
-        f"<b>الخطوة 3</b> — أدخل <b>نسب التوزيع</b> لكل عملة (المجموع = 100%):\n\n"
-        f"الصيغة: <code>عملة=نسبة, عملة=نسبة, ...</code>\n"
-        f"مثال: <code>{example}</code>\n\n"
-        f"أو أرسل <code>متساوي</code> لتوزيع متساوٍ تلقائياً.\n"
-        f"💡 إذا حددت {n-1} عملات، يمكنك ترك الأخيرة تأخذ الباقي.",
+        f"<b>الخطوة 3</b> — أدخل <b>نسب التوزيع</b> (المجموع = 100%):\n\n"
+        f"• <code>متساوي</code> → توزيع متساوٍ على الكل\n"
+        f"• <code>BTC=50</code> → BTC 50% والباقي يتقاسمون الـ 50% بالتساوي\n"
+        f"• <code>BTC=40, ETH=20</code> → والباقي يتقاسمون الـ 40%\n"
+        f"• <code>{example}</code> → تحديد الكل يدوياً\n\n"
+        f"💡 حدّد عملة أو أكثر، والباقي يُحسب تلقائياً.",
         parse_mode="HTML",
     )
     return WAIT_ALLOCATIONS
@@ -281,17 +282,23 @@ async def got_allocations(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
                 return WAIT_ALLOCATIONS
             allocations[sym] = pct
 
-        # Auto-fill last missing symbol with remainder
+        # Auto-fill missing symbols: split remainder equally among them
         missing = [s for s in symbols if s not in allocations]
-        if len(missing) == 1:
-            remainder = 100.0 - sum(allocations.values())
-            if remainder > 0:
-                allocations[missing[0]] = remainder
-        elif len(missing) > 1:
-            await update.message.reply_text(
-                f"❌ لم تحدد نسباً لـ: {', '.join(missing)}\n"
-                "حددها كلها أو اترك عملة واحدة فقط ليتم حساب الباقي تلقائياً.")
-            return WAIT_ALLOCATIONS
+        specified_total = sum(allocations.values())
+        if missing:
+            remainder = 100.0 - specified_total
+            if remainder < -0.05:
+                await update.message.reply_text(
+                    f"❌ مجموع النسب المحددة = <b>{specified_total:.2f}%</b> أكبر من 100%.",
+                    parse_mode="HTML")
+                return WAIT_ALLOCATIONS
+            if remainder < 0.05 and len(missing) > 0:
+                await update.message.reply_text(
+                    f"❌ استهلكت 100% ولم يتبقَّ شيء لـ: {', '.join(m.replace('USDT','') for m in missing)}")
+                return WAIT_ALLOCATIONS
+            each = remainder / len(missing)
+            for s in missing:
+                allocations[s] = each
 
     total_pct = sum(allocations.values())
     if abs(total_pct - 100.0) > 0.1:
