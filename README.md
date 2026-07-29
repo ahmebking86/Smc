@@ -1,29 +1,29 @@
-# ميزة استبدال عملة — تعليمات التطبيق
+# ملفات ميزة استبدال العملة — جاهزة للاستبدال الكامل
 
-## الملفات
+## الملفات (4 ملفات)
 
-| الملف | الإجراء |
-|-------|---------|
-| `bot/states.py` | استبدل الملف كاملاً |
-| `bot/keyboards.py` | استبدل الملف كاملاً |
-| `trading/rebalance_engine_REPLACE_METHOD.py` | انسخ الدالة والصقها داخل كلاس RebalanceEngine |
-| `bot/handlers_REPLACE_ADDITIONS.py` | اتبع التعليمات داخله لإضافة الكود في handlers.py |
+استبدل كل ملف بمقابله في الريبو:
 
-## خطوات
+| الملف في الـ ZIP | المسار على GitHub |
+|------------------|-------------------|
+| bot/states.py | bot/states.py |
+| bot/keyboards.py | bot/keyboards.py |
+| bot/handlers.py | bot/handlers.py |
+| trading/rebalance_engine.py | trading/rebalance_engine.py |
 
-1. استبدل `bot/states.py` و `bot/keyboards.py` بالنسخ الجديدة.
-2. افتح `trading/rebalance_engine.py`:
-   - الصق دالة `replace_asset` بعد دالة `close_asset` وقبل قسم Load.
-3. افتح `bot/handlers.py`:
-   - عدّل الاستيرادات (أضف `replace_asset_kb` و الحالات الجديدة).
-   - الصق الـ handlers الجديدة قبل `build_application`.
-   - أضف `replace_conv` و الـ CallbackQueryHandler في `build_application`.
-4. Commit + Push + Redeploy على Railway.
+## طريقة الرفع على GitHub
 
-## طريقة الاستخدام
+1. افتح كل ملف على GitHub
+2. اضغط ✏️ Edit this file
+3. امسح كل المحتوى القديم
+4. الصق المحتوى الجديد كامل
+5. Commit changes
+6. بعد الأربعة، اعمل Redeploy على Railway
+
+## طريقة الاستخدام بعد الرفع
 
 1. ادخل على محفظة نشطة
-2. اضغط **🔁 استبدال عملة**
+2. اضغط 🔁 استبدال عملة
 3. اختر العملة القديمة
-4. اكتب العملة الجديدة (مثل XRP أو XRPUSDT)
-5. أكد → البوت يبيع القديمة ويشتري الجديدة بنفس القيمة تقريباً
+4. اكتب العملة الجديدة (مثل XRP)
+5. أكد
