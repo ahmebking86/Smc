@@ -15,4 +15,8 @@
     WAIT_THRESHOLD_PCT,     # deviation % that triggers rebalance
     WAIT_CONFIRM,           # final confirmation
 
-) = range(10)
+    # ── Replace asset ────────────────────────────────────────────────────────
+    WAIT_REPLACE_NEW_SYMBOL,
+    WAIT_REPLACE_CONFIRM,
+
+) = range(12)

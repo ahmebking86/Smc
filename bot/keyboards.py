@@ -87,6 +87,9 @@ def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔄 تحديث / إعادة توازن الآن", callback_data=f"rebalance_now_{portfolio_id}"),
         ],
         [
+            InlineKeyboardButton("🔁 استبدال عملة", callback_data=f"replace_{portfolio_id}"),
+        ],
+        [
             InlineKeyboardButton("📊 التفاصيل", callback_data=f"portfolio_{portfolio_id}"),
             InlineKeyboardButton("⏸️ إيقاف مؤقت", callback_data=f"pause_{portfolio_id}"),
         ],
@@ -114,3 +117,18 @@ def asset_close_kb(portfolio_id: str, symbol: str) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("🔙 رجوع", callback_data=f"portfolio_{portfolio_id}")],
     ])
+
+
+def replace_asset_kb(portfolio_id: str, assets: list) -> InlineKeyboardMarkup:
+    """أزرار اختيار العملة المراد استبدالها."""
+    rows = []
+    for a in assets:
+        coin = a.symbol.replace("USDT", "")
+        rows.append([
+            InlineKeyboardButton(
+                f"🔁 استبدال {coin}",
+                callback_data=f"replace_pick_{portfolio_id}_{a.symbol}"
+            )
+        ])
+    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"portfolio_{portfolio_id}")])
+    return InlineKeyboardMarkup(rows)
