@@ -19,11 +19,13 @@ from bot.keyboards import (
     main_menu, confirm_cancel, back_main,
     close_all_confirm_kb, liquidate_wallet_confirm_kb,
     rebalance_mode_kb, portfolios_list, portfolio_actions, close_confirm,
+    replace_asset_kb,
 )
 from bot.states import (
     WAIT_API_KEY, WAIT_API_SECRET, WAIT_PASSPHRASE,
     WAIT_SYMBOLS, WAIT_TOTAL_AMOUNT, WAIT_ALLOCATIONS,
     WAIT_REBALANCE_MODE, WAIT_TIME_INTERVAL, WAIT_THRESHOLD_PCT, WAIT_CONFIRM,
+    WAIT_REPLACE_NEW_SYMBOL, WAIT_REPLACE_CONFIRM,
 )
 from trading.rebalance_engine import get_engine, PortfolioConfig, AssetConfig
 from trading.bitget_client import get_bitget, invalidate_credentials_cache
@@ -159,7 +161,6 @@ async def got_symbols(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("❌ أدخل عملة واحدة على الأقل:")
         return WAIT_SYMBOLS
 
-    # Deduplicate
     seen, unique = set(), []
     for s in parts:
         if not s.endswith("USDT"):
@@ -202,7 +203,7 @@ async def got_symbols(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if invalid:
         lines.append(f"\n⚠️ لم تُعثر: <code>{', '.join(invalid)}</code>")
     lines.append(
-        f"\n<b>الخطوة 2/{4 + (1 if True else 0)}</b> — أدخل <b>مبلغ الاستثمار الكلي</b> (USDT):\n"
+        f"\n<b>الخطوة 2</b> — أدخل <b>مبلغ الاستثمار الكلي</b> (USDT):\n"
         "مثال: <code>1000</code>"
     )
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -250,9 +251,7 @@ async def got_allocations(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
         for s in symbols:
             allocations[s] = equal
     else:
-        # Parse formats: BTC=50, ETH=30, SOL=20  or  BTC 50 ETH 30 ...
         raw = text.replace("%", "").replace("،", ",").upper()
-        # Try key=value pairs
         pairs = []
         if "=" in raw:
             for part in raw.replace(" ", "").split(","):
@@ -260,7 +259,6 @@ async def got_allocations(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
                     k, v = part.split("=", 1)
                     pairs.append((k.strip(), v.strip()))
         else:
-            # space separated: BTC 50 ETH 30
             tokens = raw.replace(",", " ").split()
             i = 0
             while i < len(tokens) - 1:
@@ -282,7 +280,6 @@ async def got_allocations(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
                 return WAIT_ALLOCATIONS
             allocations[sym] = pct
 
-        # Auto-fill missing symbols: split remainder equally among them
         missing = [s for s in symbols if s not in allocations]
         specified_total = sum(allocations.values())
         if missing:
@@ -307,7 +304,6 @@ async def got_allocations(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
             parse_mode="HTML")
         return WAIT_ALLOCATIONS
 
-    # Ensure all symbols present
     for s in symbols:
         if s not in allocations:
             await update.message.reply_text(f"❌ ناقصة نسبة لـ {s}")
@@ -495,7 +491,6 @@ async def cb_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     engine = get_engine()
     p = engine.get_portfolio(pid)
     if not p:
-        # try load
         row = await asyncio.to_thread(db.get_portfolio, pid)
         if not row or row.get("status") == "closed":
             await _reply(update, "❌ المحفظة غير موجودة أو مغلقة.", back_main())
@@ -631,7 +626,6 @@ async def cb_close_all_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 closed += 1
             except Exception as e:
                 logger.error("Close %s: %s", p.id[:8], e)
-        # Full liquidate
         try:
             res = await asyncio.to_thread(client.liquidate_wallet)
         except Exception as e:
@@ -691,7 +685,7 @@ async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines = ["🏦 <b>رصيد المحفظة</b>\n"]
     total_usdt = 0.0
     for item in balances:
-        coin = (item.get("coin") or item.get("currency") or "").upper()
+        coin = (item.get("coin") or item.get("currency") or item.get("asset") or "").upper()
         avail = float(item.get("available") or item.get("availableBalance") or item.get("free") or 0)
         if avail <= 0:
             continue
@@ -711,18 +705,123 @@ async def cb_total_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return await _deny(update)
     rows = await asyncio.to_thread(db.list_active_portfolios)
-    # Also closed would need another query; keep simple
     total = 0.0
     lines = ["💰 <b>ملخص المحافظ</b>\n"]
     for row in rows:
-        pnl = float(row.get("total_pnl") or 0)
-        # live estimate from trades
         trade_pnl = await asyncio.to_thread(db.portfolio_total_pnl, row["id"])
         total += trade_pnl
         lines.append(f"  • <code>{row['id'][:8]}</code>: {trade_pnl:+.2f} USDT")
     lines.append(f"\nالإجمالي التقريبي: <b>{total:+.2f} USDT</b>")
     lines.append("\n<i>ملاحظة: P&L تقريبي من صفقات الشراء/البيع المسجّلة.</i>")
     await _reply(update, "\n".join(lines), back_main())
+
+
+# ── استبدال عملة ─────────────────────────────────────────────────────────────
+
+async def cb_replace_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return await _deny(update)
+    pid = update.callback_query.data.replace("replace_", "")
+    engine = get_engine()
+    p = engine.get_portfolio(pid)
+    if not p:
+        await _reply(update, "❌ المحفظة غير موجودة.", back_main())
+        return
+    active = [a for a in p.assets if a.status == "active"]
+    if not active:
+        await _reply(update, "❌ لا توجد عملات نشطة في المحفظة.", portfolio_actions(pid))
+        return
+    ctx.user_data["replace_pid"] = pid
+    await _reply(update,
+        f"🔁 <b>استبدال عملة</b>\nمحفظة: <code>{pid[:8]}</code>\n\n"
+        "اختر العملة التي تريد استبدالها:",
+        replace_asset_kb(pid, active))
+
+
+async def cb_replace_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _authorized(update):
+        await _deny(update)
+        return ConversationHandler.END
+    data = update.callback_query.data
+    rest = data.replace("replace_pick_", "", 1)
+    if len(rest) < 37:
+        await _reply(update, "❌ بيانات غير صحيحة.", back_main())
+        return ConversationHandler.END
+    pid = rest[:36]
+    old_symbol = rest[37:]
+    ctx.user_data["replace_pid"] = pid
+    ctx.user_data["replace_old"] = old_symbol
+    await _reply(update,
+        f"🔁 استبدال <b>{old_symbol.replace('USDT','')}</b>\n\n"
+        "أرسل رمز العملة الجديدة:\n"
+        "مثال: <code>XRPUSDT</code> أو <code>XRP</code>",
+        back_main())
+    return WAIT_REPLACE_NEW_SYMBOL
+
+
+async def got_replace_new_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = update.message.text.strip().upper()
+    if not raw.endswith("USDT"):
+        raw += "USDT"
+    ctx.user_data["replace_new"] = raw
+    old = ctx.user_data.get("replace_old", "?")
+    await update.message.reply_text(
+        f"🔁 تأكيد الاستبدال:\n\n"
+        f"من: <b>{old.replace('USDT','')}</b>\n"
+        f"إلى: <b>{raw.replace('USDT','')}</b>\n\n"
+        f"سيتم بيع القديمة وشراء الجديدة بنفس القيمة تقريباً.",
+        parse_mode="HTML",
+        reply_markup=confirm_cancel()
+    )
+    return WAIT_REPLACE_CONFIRM
+
+
+async def cb_replace_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _authorized(update):
+        await _deny(update)
+        return ConversationHandler.END
+    if update.callback_query.data == "cancel":
+        await _reply(update, "❌ تم الإلغاء.", main_menu())
+        ctx.user_data.clear()
+        return ConversationHandler.END
+
+    pid = ctx.user_data.get("replace_pid")
+    old_sym = ctx.user_data.get("replace_old")
+    new_sym = ctx.user_data.get("replace_new")
+    if not all([pid, old_sym, new_sym]):
+        await _reply(update, "❌ بيانات ناقصة.", main_menu())
+        return ConversationHandler.END
+
+    engine = get_engine()
+    p = engine.get_portfolio(pid)
+    if not p:
+        await _reply(update, "❌ المحفظة غير موجودة.", main_menu())
+        return ConversationHandler.END
+
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text("⏳ جارٍ الاستبدال...")
+
+    try:
+        result = await asyncio.to_thread(engine.replace_asset, p, old_sym, new_sym)
+    except Exception as e:
+        await update.callback_query.message.reply_text(
+            f"❌ فشل الاستبدال:\n<code>{_html.escape(str(e))}</code>",
+            parse_mode="HTML", reply_markup=portfolio_actions(pid))
+        ctx.user_data.clear()
+        return ConversationHandler.END
+
+    lines = [f"✅ <b>تم الاستبدال</b>\n"]
+    for a in result.get("actions", []):
+        lines.append(f"  • {a}")
+    if result.get("errors"):
+        lines.append("\n⚠️ أخطاء:")
+        for e in result["errors"]:
+            lines.append(f"  • {_html.escape(str(e)[:100])}")
+    lines.append(f"\nمن <b>{old_sym.replace('USDT','')}</b> → <b>{new_sym.replace('USDT','')}</b>")
+    await update.callback_query.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", reply_markup=portfolio_actions(pid))
+    ctx.user_data.clear()
+    return ConversationHandler.END
 
 
 # ── Cancel command ────────────────────────────────────────────────────────────
@@ -736,7 +835,6 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ── Build application ─────────────────────────────────────────────────────────
 
 def build_application(app) -> None:
-    # API conversation
     api_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_setup_api, pattern="^setup_api$")],
         states={
@@ -752,7 +850,6 @@ def build_application(app) -> None:
         allow_reentry=True,
     )
 
-    # New portfolio conversation
     new_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_new_portfolio, pattern="^new_portfolio$")],
         states={
@@ -788,11 +885,28 @@ def build_application(app) -> None:
         allow_reentry=True,
     )
 
+    replace_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_replace_pick, pattern=r"^replace_pick_"),
+        ],
+        states={
+            WAIT_REPLACE_NEW_SYMBOL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, got_replace_new_symbol)
+            ],
+            WAIT_REPLACE_CONFIRM: [
+                CallbackQueryHandler(cb_replace_confirm, pattern="^(confirm|cancel)$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(api_conv)
     app.add_handler(new_conv)
+    app.add_handler(replace_conv)
 
     app.add_handler(CallbackQueryHandler(cb_main_menu, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(cb_active_portfolios, pattern="^active_portfolios$"))
@@ -807,3 +921,4 @@ def build_application(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_liquidate_ok, pattern="^liquidate_ok$"))
     app.add_handler(CallbackQueryHandler(cb_balance, pattern="^balance$"))
     app.add_handler(CallbackQueryHandler(cb_total_pnl, pattern="^total_pnl$"))
+    app.add_handler(CallbackQueryHandler(cb_replace_start, pattern=r"^replace_[a-f0-9-]{36}$"))
