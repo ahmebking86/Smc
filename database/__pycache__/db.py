@@ -1,5 +1,6 @@
 """
 PostgreSQL database layer — portfolios, assets, trades, settings.
+Fixed: robust schema migration for bot_settings, connection resilience.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None:
         try:
-            _pool = psycopg2.pool.ThreadedConnectionPool(1, 10, DATABASE_URL)
+            _pool = psycopg2.pool.ThreadedConnectionPool(1, 15, DATABASE_URL)
             logger.info("✅ اتصال PostgreSQL تم بنجاح.")
         except Exception as exc:
             logger.critical("❌ فشل الاتصال بـ PostgreSQL: %s", exc)
@@ -30,35 +31,74 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     return _pool
 
 
+def _reset_pool() -> None:
+    """Close and recreate the pool (used after connection errors)."""
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.closeall()
+        except Exception:
+            pass
+        _pool = None
+    _get_pool()
+
+
 def _exec(
     sql: str,
     params: tuple | None = None,
     fetch: str = "none",
+    retries: int = 2,
 ) -> Any:
-    pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            conn.commit()
-            if fetch == "one":
-                row = cur.fetchone()
-                return dict(row) if row else None
-            elif fetch == "all":
-                rows = cur.fetchall()
-                return [dict(r) for r in rows]
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
+    last_err = None
+    for attempt in range(retries + 1):
+        pool = _get_pool()
+        conn = None
+        try:
+            conn = pool.getconn()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                conn.commit()
+                if fetch == "one":
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+                elif fetch == "all":
+                    rows = cur.fetchall()
+                    return [dict(r) for r in rows]
+                return None
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            last_err = e
+            logger.warning("DB connection error (attempt %d): %s", attempt + 1, e)
+            if conn:
+                try:
+                    pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+            _reset_pool()
+            if attempt < retries:
+                continue
+            raise
+        except Exception:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise
+        finally:
+            if conn is not None:
+                try:
+                    pool.putconn(conn)
+                except Exception:
+                    pass
+    if last_err:
+        raise last_err
 
 
 _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS portfolios (
     id                    TEXT        PRIMARY KEY,
     total_investment      NUMERIC     NOT NULL,
-    rebalance_mode        TEXT        NOT NULL,   -- 'time' | 'percent'
+    rebalance_mode        TEXT        NOT NULL,
     interval_hours        NUMERIC     NOT NULL DEFAULT 0,
     threshold_pct         NUMERIC     NOT NULL DEFAULT 0,
     status                TEXT        NOT NULL DEFAULT 'active',
@@ -82,7 +122,7 @@ CREATE TABLE IF NOT EXISTS rebalance_trades (
     id              TEXT        PRIMARY KEY,
     portfolio_id    TEXT        NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
     symbol          TEXT        NOT NULL,
-    side            TEXT        NOT NULL,   -- buy | sell
+    side            TEXT        NOT NULL,
     usdt_amount     NUMERIC     NOT NULL,
     qty             NUMERIC     NOT NULL DEFAULT 0,
     price           NUMERIC     NOT NULL DEFAULT 0,
@@ -100,16 +140,52 @@ CREATE INDEX IF NOT EXISTS idx_trades_portfolio  ON rebalance_trades(portfolio_i
 """
 
 
+def _ensure_bot_settings_schema(cur) -> None:
+    """Detect wrong schema (old flat columns) and recreate bot_settings."""
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'bot_settings'
+    """)
+    cols = {row[0] for row in cur.fetchall()}
+    if not cols:
+        return
+    expected = {"key", "value"}
+    if cols != expected and "key" not in cols:
+        logger.warning("bot_settings has wrong schema %s — recreating", cols)
+        cur.execute("DROP TABLE IF EXISTS bot_settings CASCADE")
+        cur.execute("""
+            CREATE TABLE bot_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        logger.info("✅ جدول bot_settings أُنشئ/أُصلح.")
+    elif "value" not in cols:
+        logger.warning("bot_settings missing 'value' column — recreating")
+        cur.execute("DROP TABLE IF EXISTS bot_settings CASCADE")
+        cur.execute("""
+            CREATE TABLE bot_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        logger.info("✅ جدول bot_settings أُنشئ/أُصلح.")
+
+
 def init_db() -> None:
     pool = _get_pool()
     conn = pool.getconn()
     try:
         with conn.cursor() as cur:
             cur.execute(_CREATE_TABLES_SQL)
+            _ensure_bot_settings_schema(cur)
         conn.commit()
         logger.info("✅ قاعدة البيانات جاهزة.")
     except Exception as exc:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.critical("❌ فشل تهيئة قاعدة البيانات: %s", exc)
         raise
     finally:
