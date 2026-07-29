@@ -99,7 +99,6 @@ class RebalanceEngine:
             created_at=now,
         )
 
-        # ── Initial buys ──────────────────────────────────────────────────────
         results: list[str] = []
         errors: list[str] = []
 
@@ -112,8 +111,7 @@ class RebalanceEngine:
                 price = self.client.get_price(ac.symbol)
                 _, qty_places = self.client.get_symbol_precision(ac.symbol)
                 self.client.place_market_buy_usdt(ac.symbol, usdt)
-                # Estimate qty received (actual fill may differ slightly due to fees)
-                est_qty = round(usdt / price * 0.998, qty_places)  # ~0.2% fee buffer
+                est_qty = round(usdt / price * 0.998, qty_places)
                 asset_id = str(uuid.uuid4())
                 db.create_asset({
                     "id":           asset_id,
@@ -139,7 +137,7 @@ class RebalanceEngine:
                     initial_qty=est_qty,
                 ))
                 results.append(f"✅ {ac.symbol}: اشتريت بـ {usdt:.2f} USDT")
-                time.sleep(0.3)  # rate-limit friendly
+                time.sleep(0.3)
             except Exception as e:
                 logger.error("Initial buy %s failed: %s", ac.symbol, e)
                 errors.append(f"❌ {ac.symbol}: {e}")
@@ -162,13 +160,11 @@ class RebalanceEngine:
     # ── Snapshot helpers ──────────────────────────────────────────────────────
 
     def _get_balances(self) -> dict[str, float]:
-        """Return {coin: available_qty} from account."""
         balances: dict[str, float] = {}
         try:
             raw = self.client.get_account_balance()
             for item in raw:
                 coin = item.get("coin") or item.get("currency") or item.get("asset") or ""
-                # available = free, not frozen
                 avail = float(
                     item.get("available")
                     or item.get("availableBalance")
@@ -182,15 +178,6 @@ class RebalanceEngine:
         return balances
 
     def snapshot(self, portfolio: Portfolio) -> dict:
-        """
-        Return current state of the portfolio:
-        {
-          "total_value": float,
-          "assets": [
-            {"symbol", "target_pct", "current_pct", "value", "qty", "price", "deviation"}
-          ]
-        }
-        """
         balances = self._get_balances()
         prices: dict[str, float] = {}
         rows = []
@@ -253,10 +240,6 @@ class RebalanceEngine:
         return False
 
     def rebalance(self, portfolio: Portfolio) -> dict:
-        """
-        Execute rebalance: sell overweight, buy underweight.
-        Returns summary dict with actions and errors.
-        """
         snap = self.snapshot(portfolio)
         total = snap["total_value"]
         if total < MIN_ORDER_USDT * 2:
@@ -265,7 +248,6 @@ class RebalanceEngine:
         actions: list[str] = []
         errors: list[str] = []
 
-        # 1. Sell overweight first (free USDT)
         for a in snap["assets"]:
             excess_pct = a["deviation"]
             if excess_pct <= 0.1:
@@ -278,7 +260,6 @@ class RebalanceEngine:
                 continue
             _, qty_places = self.client.get_symbol_precision(a["symbol"])
             sell_qty = math.floor((excess_usdt / price) * 10**qty_places) / 10**qty_places
-            # Don't sell more than we have
             sell_qty = min(sell_qty, a["qty"])
             if sell_qty * price < MIN_ORDER_USDT:
                 continue
@@ -299,15 +280,12 @@ class RebalanceEngine:
                 logger.error("Rebalance sell %s: %s", a["symbol"], e)
                 errors.append(f"بيع {a['coin']}: {e}")
 
-        # Small pause so USDT becomes available
         if actions:
             time.sleep(1.5)
 
-        # Refresh balances after sells
         balances = self._get_balances()
         usdt_available = balances.get("USDT", 0.0)
 
-        # 2. Buy underweight
         for a in snap["assets"]:
             deficit_pct = -a["deviation"]
             if deficit_pct <= 0.1:
@@ -351,15 +329,12 @@ class RebalanceEngine:
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def close_portfolio(self, portfolio: Portfolio, sell: bool = True) -> float:
-        """Close portfolio. If sell=True, market-sell all assets to USDT."""
         symbols = [a.symbol for a in portfolio.assets if a.status == "active"]
         if sell and symbols:
             try:
-                # Re-use existing robust close logic
                 self.client.close_all_at_market(symbols)
             except Exception as e:
                 logger.error("close_all_at_market failed: %s", e)
-                # Fallback: try one by one
                 balances = self._get_balances()
                 for sym in symbols:
                     coin = sym.replace("USDT", "")
@@ -373,7 +348,6 @@ class RebalanceEngine:
                         logger.warning("Fallback sell %s: %s", sym, e2)
 
         pnl = db.portfolio_total_pnl(portfolio.id)
-        # Rough mark-to-market adjustment not stored; keep trade-based approx
         db.close_portfolio(portfolio.id, pnl)
         portfolio.status = "closed"
         portfolio.total_pnl = pnl
@@ -381,7 +355,6 @@ class RebalanceEngine:
         return pnl
 
     def close_asset(self, portfolio: Portfolio, symbol: str) -> str:
-        """Sell one asset and remove it from the portfolio."""
         asset = next((a for a in portfolio.assets if a.symbol == symbol and a.status == "active"), None)
         if not asset:
             return f"العملة {symbol} غير موجودة في المحفظة."
@@ -414,8 +387,111 @@ class RebalanceEngine:
 
         db.deactivate_asset(asset.id)
         asset.status = "closed"
-        # Redistribute remaining targets? Keep simple: leave percentages as-is
         return msg
+
+    def replace_asset(self, portfolio: Portfolio, old_symbol: str, new_symbol: str) -> dict:
+        """استبدال عملة: بيع القديمة وشراء الجديدة بنفس القيمة تقريباً."""
+        old_symbol = old_symbol.upper()
+        new_symbol = new_symbol.upper()
+        if not new_symbol.endswith("USDT"):
+            new_symbol += "USDT"
+
+        old_asset = None
+        for a in portfolio.assets:
+            if a.symbol == old_symbol and a.status == "active":
+                old_asset = a
+                break
+        if not old_asset:
+            raise RuntimeError(f"العملة {old_symbol} غير موجودة في المحفظة")
+
+        for a in portfolio.assets:
+            if a.symbol == new_symbol and a.status == "active":
+                raise RuntimeError(f"العملة {new_symbol} موجودة بالفعل في المحفظة")
+
+        try:
+            new_price = self.client.get_price(new_symbol)
+        except Exception as e:
+            raise RuntimeError(f"تعذر جلب سعر {new_symbol}: {e}")
+
+        snap = self.snapshot(portfolio)
+        old_row = next((r for r in snap["assets"] if r["symbol"] == old_symbol), None)
+        if not old_row or old_row["qty"] <= 0:
+            raise RuntimeError(f"لا يوجد رصيد لـ {old_symbol}")
+
+        usdt_value = old_row["value"]
+        if usdt_value < MIN_ORDER_USDT:
+            raise RuntimeError(f"قيمة {old_symbol} صغيرة جداً ({usdt_value:.2f} USDT)")
+
+        actions = []
+        errors = []
+
+        try:
+            _, qty_places = self.client.get_symbol_precision(old_symbol)
+            sell_qty = old_row["qty"]
+            self.client.place_market_sell(old_symbol, sell_qty, qty_places)
+            db.create_trade({
+                "id": str(uuid.uuid4()),
+                "portfolio_id": portfolio.id,
+                "symbol": old_symbol,
+                "side": "sell",
+                "usdt_amount": round(usdt_value, 2),
+                "qty": sell_qty,
+                "price": old_row["price"],
+            })
+            actions.append(f"🔴 بيع {old_symbol.replace('USDT','')}: {sell_qty} ≈ {usdt_value:.2f} USDT")
+            time.sleep(1.2)
+        except Exception as e:
+            raise RuntimeError(f"فشل بيع {old_symbol}: {e}")
+
+        try:
+            buy_usdt = round(usdt_value * 0.997, 2)
+            if buy_usdt < MIN_ORDER_USDT:
+                buy_usdt = MIN_ORDER_USDT
+            self.client.place_market_buy_usdt(new_symbol, buy_usdt)
+            _, qty_places = self.client.get_symbol_precision(new_symbol)
+            est_qty = round(buy_usdt / new_price * 0.998, qty_places)
+            db.create_trade({
+                "id": str(uuid.uuid4()),
+                "portfolio_id": portfolio.id,
+                "symbol": new_symbol,
+                "side": "buy",
+                "usdt_amount": buy_usdt,
+                "qty": est_qty,
+                "price": new_price,
+            })
+            actions.append(f"🟢 شراء {new_symbol.replace('USDT','')}: ≈ {buy_usdt:.2f} USDT")
+        except Exception as e:
+            errors.append(f"فشل شراء {new_symbol}: {e}")
+            return {"actions": actions, "errors": errors, "success": False}
+
+        db.deactivate_asset(old_asset.id)
+        old_asset.status = "closed"
+
+        new_asset_id = str(uuid.uuid4())
+        db.create_asset({
+            "id": new_asset_id,
+            "portfolio_id": portfolio.id,
+            "symbol": new_symbol,
+            "target_pct": old_asset.target_pct,
+            "initial_qty": est_qty,
+            "status": "active",
+        })
+        portfolio.assets.append(PortfolioAsset(
+            id=new_asset_id,
+            symbol=new_symbol,
+            target_pct=old_asset.target_pct,
+            initial_qty=est_qty,
+            status="active",
+        ))
+
+        return {
+            "actions": actions,
+            "errors": errors,
+            "success": True,
+            "old_symbol": old_symbol,
+            "new_symbol": new_symbol,
+            "usdt_value": usdt_value,
+        }
 
     # ── Load / manage ─────────────────────────────────────────────────────────
 
