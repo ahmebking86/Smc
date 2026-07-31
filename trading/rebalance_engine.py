@@ -95,6 +95,13 @@ class RebalanceEngine:
                 logger.error("Failed to load portfolio %s: %s", row.get("id", "?")[:8], e)
         logger.info("Loaded %d portfolios from DB", len(self._portfolios))
 
+
+    def get_portfolio(self, portfolio_id: str) -> Optional[Portfolio]:
+        return self._portfolios.get(portfolio_id)
+
+    def all_portfolios(self) -> list[Portfolio]:
+        return list(self._portfolios.values())
+
     # ── Create ────────────────────────────────────────────────────────────────
 
     def create_portfolio(self, config: PortfolioConfig) -> Portfolio:
