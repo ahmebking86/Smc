@@ -226,7 +226,7 @@ async def cb_choose_exchange_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     ctx.user_data["exchange"] = exchange
 
     client = get_mexc() if exchange == "mexc" else get_bitget()
-    name = client.exchange_name
+    name = "MEXC" if exchange == "mexc" else "BitGet"
     if not await asyncio.to_thread(client.has_credentials):
         await _reply(update,
             f"⚠️ يجب إعداد مفاتيح {name} API أولاً.\nاضغط ⚙️ إعدادات API.",
@@ -279,7 +279,7 @@ async def got_symbols(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             invalid.append(sym)
 
     if not valid:
-        await update.message.reply_text(f"❌ لم أجد أي عملة على {client.exchange_name}. حاول مجدداً:")
+        await update.message.reply_text(f"❌ لم أجد أي عملة على {('MEXC' if exchange == 'mexc' else 'BitGet')}. حاول مجدداً:")
         return WAIT_SYMBOLS
 
     ctx.user_data["symbols"] = [s for s, _ in valid]
