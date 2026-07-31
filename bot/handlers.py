@@ -1,5 +1,6 @@
 """
 All Telegram handlers — rebalance portfolio bot.
+Supports Bitget + MEXC.
 """
 
 from __future__ import annotations
@@ -156,7 +157,6 @@ async def got_api_secret(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data["api_secret"] = update.message.text.strip()
     exchange = ctx.user_data.get("api_exchange", "bitget")
     if exchange == "mexc":
-        # MEXC لا يحتاج Passphrase — احفظ مباشرة
         key = ctx.user_data.get("api_key", "")
         secret = ctx.user_data["api_secret"]
         await asyncio.to_thread(db.set_setting, "mexc_api_key", key)
@@ -174,7 +174,6 @@ async def got_api_secret(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 parse_mode="HTML", reply_markup=main_menu())
         ctx.user_data.clear()
         return ConversationHandler.END
-    # Bitget يحتاج Passphrase
     await update.message.reply_text("أرسل <b>Passphrase</b>:", parse_mode="HTML")
     return WAIT_PASSPHRASE
 
@@ -212,7 +211,7 @@ async def cb_new_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         "🆕 <b>إنشاء محفظة إعادة توازن</b>\n\n"
         "اختر المنصة:",
         exchange_select_kb("new"))
-    return ConversationHandler.END
+    return WAIT_EXCHANGE_CHOICE  # FIXED: was ConversationHandler.END
 
 
 async def cb_choose_exchange_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -467,8 +466,9 @@ async def _show_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     allocs = ctx.user_data["allocations"]
     total = ctx.user_data["total_amount"]
     mode = ctx.user_data["rebalance_mode"]
+    exch = ctx.user_data.get("exchange", "bitget").upper()
     lines = [
-        "📋 <b>ملخص المحفظة — تأكيد الإنشاء</b>",
+        f"📋 <b>ملخص المحفظة — تأكيد الإنشاء</b> [{exch}]",
         "<code>─────────────────────────</code>",
         f"💰 المبلغ الكلي: <b>{total:.2f} USDT</b>",
         f"🪙 عدد العملات: <b>{len(symbols)}</b>",
@@ -562,13 +562,14 @@ async def cb_active_portfolios(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             "status": row.get("status", "active"),
             "asset_count": count,
             "total_investment": float(row.get("total_investment") or 0),
+            "exchange": row.get("exchange", "bitget"),
         })
 
     lines = [f"📊 <b>المحافظ النشطة ({len(display)})</b>\n"]
     for d in display:
         lines.append(
-            f"• <code>{d['id'][:8]}</code> — {d['asset_count']} عملة — "
-            f"{d['total_investment']:.0f} USDT"
+            f"• <code>{d['id'][:8]}</code> [{d.get('exchange','bitget').upper()}] — "
+            f"{d['asset_count']} عملة — {d['total_investment']:.0f} USDT"
         )
     lines.append("\nاختر محفظة للتحكم بها:")
     await _reply(update, "\n".join(lines), portfolios_list(display))
@@ -705,7 +706,6 @@ async def cb_close_all_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     await update.callback_query.edit_message_text("⏳ جارٍ إغلاق جميع المحافظ...")
     pause_monitor()
     engine = get_engine()
-    client = get_bitget()
     closed = 0
     total_pnl = 0.0
     try:
@@ -716,19 +716,10 @@ async def cb_close_all_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 closed += 1
             except Exception as e:
                 logger.error("Close %s: %s", p.id[:8], e)
-        try:
-            res = await asyncio.to_thread(client.liquidate_wallet)
-        except Exception as e:
-            res = {"cancelled_orders": 0, "sold": [], "errors": [str(e)], "skipped": []}
     finally:
         resume_monitor()
 
     lines = [f"✅ أُغلقت {closed} محفظة"]
-    lines.append(f"🚫 أوامر ملغاة: {res.get('cancelled_orders', 0)}")
-    if res.get("sold"):
-        lines.append("💹 مبيعات:")
-        for s in res["sold"][:10]:
-            lines.append(f"  • {_html.escape(str(s))}")
     lines.append(f"\n💵 P&L تقريبي: <b>{total_pnl:+.4f} USDT</b>")
     await update.callback_query.message.reply_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=main_menu())
@@ -748,15 +739,19 @@ async def cb_liquidate_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         return await _deny(update)
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("⏳ جارٍ التصفية...")
-    client = get_bitget()
-    try:
-        res = await asyncio.to_thread(client.liquidate_wallet)
-    except Exception as e:
-        await _reply(update, f"❌ {e}", back_main())
-        return
-    lines = ["✅ اكتملت التصفية", f"🚫 أوامر: {res.get('cancelled_orders',0)}"]
-    for s in res.get("sold", [])[:10]:
-        lines.append(f"  • {_html.escape(str(s))}")
+    # try both exchanges
+    results = []
+    for name, getter in [("Bitget", get_bitget), ("MEXC", get_mexc)]:
+        try:
+            client = getter()
+            if await asyncio.to_thread(client.has_credentials):
+                res = await asyncio.to_thread(client.liquidate_wallet)
+                results.append(f"[{name}] أوامر: {res.get('cancelled_orders',0)}")
+                for s in res.get("sold", [])[:5]:
+                    results.append(f"  • {_html.escape(str(s))}")
+        except Exception as e:
+            results.append(f"[{name}] ❌ {e}")
+    lines = ["✅ اكتملت التصفية"] + results
     await _reply(update, "\n".join(lines), back_main())
 
 
@@ -765,29 +760,36 @@ async def cb_liquidate_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return await _deny(update)
-    client = get_bitget()
-    try:
-        balances = await asyncio.to_thread(client.get_account_balance)
-        prices = await asyncio.to_thread(client.get_all_tickers)
-    except Exception as e:
-        await _reply(update, f"❌ {e}", back_main())
-        return
     lines = ["🏦 <b>رصيد المحفظة</b>\n"]
-    total_usdt = 0.0
-    for item in balances:
-        coin = (item.get("coin") or item.get("currency") or item.get("asset") or "").upper()
-        avail = float(item.get("available") or item.get("availableBalance") or item.get("free") or 0)
-        if avail <= 0:
-            continue
-        if coin == "USDT":
-            val = avail
-        else:
-            val = avail * prices.get(coin, 0)
-        if val < 0.5:
-            continue
-        total_usdt += val
-        lines.append(f"  • <code>{coin}</code>: {avail:.6g} ≈ {val:.2f} USDT")
-    lines.append(f"\n💵 الإجمالي التقريبي: <b>{total_usdt:.2f} USDT</b>")
+    for name, getter in [("Bitget", get_bitget), ("MEXC", get_mexc)]:
+        try:
+            client = getter()
+            if not await asyncio.to_thread(client.has_credentials):
+                lines.append(f"• {name}: غير متصل")
+                continue
+            balances = await asyncio.to_thread(client.get_account_balance)
+            total_usdt = 0.0
+            lines.append(f"\n<b>{name}:</b>")
+            for item in balances:
+                coin = (item.get("coin") or item.get("currency") or item.get("asset") or "").upper()
+                avail = float(item.get("available") or item.get("availableBalance") or item.get("free") or 0)
+                if avail <= 0:
+                    continue
+                if coin == "USDT":
+                    val = avail
+                else:
+                    try:
+                        price = await asyncio.to_thread(client.get_price, coin + "USDT")
+                        val = avail * price
+                    except Exception:
+                        val = 0
+                if val < 0.5 and coin != "USDT":
+                    continue
+                total_usdt += val
+                lines.append(f"  • <code>{coin}</code>: {avail:.6g} ≈ {val:.2f} USDT")
+            lines.append(f"  💵 الإجمالي: <b>{total_usdt:.2f} USDT</b>")
+        except Exception as e:
+            lines.append(f"• {name}: ❌ {_html.escape(str(e)[:80])}")
     await _reply(update, "\n".join(lines), back_main())
 
 
@@ -914,8 +916,6 @@ async def cb_replace_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-
-
 # ── حذف عملة ─────────────────────────────────────────────────────────────────
 
 async def cb_delete_asset_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -929,6 +929,7 @@ async def cb_delete_asset_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     assets = [a for a in portfolio.assets if a.status == "active"]
     await q.edit_message_text("اختر العملة المراد حذفها:", reply_markup=delete_asset_kb(portfolio_id, assets))
 
+
 async def cb_delete_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.replace("delete_pick_", "").split("_", 1)
@@ -938,6 +939,7 @@ async def cb_delete_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=confirm_delete_kb(portfolio_id, symbol)
     )
+
 
 async def cb_delete_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -961,6 +963,7 @@ async def cb_add_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["add_funds_pid"] = portfolio_id
     await q.edit_message_text("أرسل المبلغ بالـ USDT الذي تريد إضافته:")
     return WAIT_ADD_FUNDS_AMOUNT
+
 
 async def got_add_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -986,6 +989,7 @@ async def cb_reduce_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["reduce_funds_pid"] = portfolio_id
     await q.edit_message_text("أرسل النسبة المئوية للتخفيف (مثال: 20):")
     return WAIT_REDUCE_FUNDS_AMOUNT
+
 
 async def got_reduce_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1049,6 +1053,10 @@ def build_application(app) -> None:
     new_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_new_portfolio, pattern="^new_portfolio$")],
         states={
+            # FIXED: exchange choice is inside the conversation
+            WAIT_EXCHANGE_CHOICE: [
+                CallbackQueryHandler(cb_choose_exchange_new, pattern=r"^exch_new_"),
+            ],
             WAIT_SYMBOLS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, got_symbols),
             ],
@@ -1143,4 +1151,4 @@ def build_application(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_delete_ok, pattern=r"^delete_ok_"))
     app.add_handler(CallbackQueryHandler(cb_performance, pattern=r"^performance_"))
     app.add_handler(CallbackQueryHandler(cb_choose_exchange_api, pattern=r"^exch_api_"))
-    app.add_handler(CallbackQueryHandler(cb_choose_exchange_new, pattern=r"^exch_new_"))
+    # NOTE: cb_choose_exchange_new is ONLY inside new_conv — do NOT register here
