@@ -1,6 +1,4 @@
-"""All Telegram inline keyboard builders — Bitget + MEXC support.
-يصدّر كل الأسماء اللي handlers ممكن يستوردها (aliases).
-"""
+"""All Telegram inline keyboard builders — Bitget + MEXC support."""
 
 from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -28,20 +26,29 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def exchange_select_kb(purpose: str = "api") -> InlineKeyboardMarkup:
-    """اختيار المنصة — الاسم اللي handlers بيستورده."""
+def exchange_choice_kb() -> InlineKeyboardMarkup:
+    """أزرار اختيار المنصة لإعداد API — callback يطابق handlers."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🟡 BitGet", callback_data=f"exch_{purpose}_bitget"),
-            InlineKeyboardButton("🔵 MEXC",   callback_data=f"exch_{purpose}_mexc"),
+            InlineKeyboardButton("🟡 BitGet", callback_data="api_exchange_bitget"),
+            InlineKeyboardButton("🔵 MEXC",   callback_data="api_exchange_mexc"),
         ],
         [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
     ])
 
 
-def exchange_choice_kb() -> InlineKeyboardMarkup:
-    """alias"""
-    return exchange_select_kb("api")
+def exchange_select_kb(purpose: str = "api") -> InlineKeyboardMarkup:
+    """اختيار المنصة لإنشاء محفظة أو API."""
+    if purpose == "api":
+        return exchange_choice_kb()
+    # purpose == "new"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟡 BitGet", callback_data="exch_new_bitget"),
+            InlineKeyboardButton("🔵 MEXC",   callback_data="exch_new_mexc"),
+        ],
+        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+    ])
 
 
 def confirm_cancel() -> InlineKeyboardMarkup:
@@ -101,7 +108,6 @@ def portfolios_list(portfolios: list[dict]) -> InlineKeyboardMarkup:
 
 
 def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
-    """أزرار المحفظة الكاملة."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 تحديث / إعادة توازن الآن", callback_data=f"rebalance_now_{portfolio_id}"),
@@ -129,7 +135,6 @@ def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
 
 
 def portfolio_actions_v2(portfolio_id: str) -> InlineKeyboardMarkup:
-    """alias — handlers بيستورد portfolio_actions_v2"""
     return portfolio_actions(portfolio_id)
 
 
