@@ -1,6 +1,6 @@
 """
 PostgreSQL database layer — portfolios, assets, trades, settings.
-Fixed: robust schema migration for bot_settings, connection resilience.
+Supports Bitget + MEXC (exchange column on portfolios).
 """
 
 from __future__ import annotations
@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS portfolios (
     total_pnl             NUMERIC     NOT NULL DEFAULT 0,
     last_rebalance_at     TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at             TIMESTAMPTZ
+    closed_at             TIMESTAMPTZ,
+    exchange              TEXT        NOT NULL DEFAULT 'bitget'
 );
 
 CREATE TABLE IF NOT EXISTS portfolio_assets (
@@ -172,6 +173,20 @@ def _ensure_bot_settings_schema(cur) -> None:
         logger.info("✅ جدول bot_settings أُنشئ/أُصلح.")
 
 
+def _ensure_exchange_column(cur) -> None:
+    """Add exchange column to portfolios if missing (migration for existing DBs)."""
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'portfolios' AND column_name = 'exchange'
+    """)
+    if cur.fetchone() is None:
+        cur.execute("""
+            ALTER TABLE portfolios
+            ADD COLUMN exchange TEXT NOT NULL DEFAULT 'bitget'
+        """)
+        logger.info("✅ أُضيف عمود exchange لجدول portfolios.")
+
+
 def init_db() -> None:
     pool = _get_pool()
     conn = pool.getconn()
@@ -179,6 +194,7 @@ def init_db() -> None:
         with conn.cursor() as cur:
             cur.execute(_CREATE_TABLES_SQL)
             _ensure_bot_settings_schema(cur)
+            _ensure_exchange_column(cur)
         conn.commit()
         logger.info("✅ قاعدة البيانات جاهزة.")
     except Exception as exc:
