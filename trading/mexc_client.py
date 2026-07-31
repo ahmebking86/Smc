@@ -66,7 +66,6 @@ class MexcClient:
         api_key, _ = _get_credentials()
         return {
             "X-MEXC-APIKEY": api_key,
-            "Content-Type": "application/json",
         }
 
     def _build_signed_query(self, params: dict | None = None) -> str:
@@ -111,15 +110,13 @@ class MexcClient:
         return data
 
     def _post(self, path: str, params: dict) -> Any:
-        """POST with signed form body (MEXC official style)."""
+        """POST with signed params in query string (avoids Content-Type errors)."""
         qs = self._build_signed_query(params)
-        # Send as application/x-www-form-urlencoded body
-        headers = self._headers()
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        # MEXC accepts signed params in the URL for POST /api/v3/order
+        url = f"{self.base}{path}?{qs}"
         resp = self.session.post(
-            self.base + path,
-            data=qs,
-            headers=headers,
+            url,
+            headers=self._headers(),
             timeout=15,
         )
         if not resp.ok:
