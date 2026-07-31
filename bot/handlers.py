@@ -18,7 +18,7 @@ from config import TELEGRAM_CHAT_ID, MAX_ASSETS, MIN_ORDER_USDT
 from bot.keyboards import (
     main_menu, confirm_cancel, back_main,
     close_all_confirm_kb, liquidate_wallet_confirm_kb,
-    rebalance_mode_kb, portfolios_list, portfolio_actions, portfolio_actions_v2,
+    rebalance_mode_kb, portfolios_list, portfolio_actions,
     close_confirm, replace_asset_kb, delete_asset_kb, confirm_delete_kb,
 )
 from bot.states import (
@@ -26,8 +26,8 @@ from bot.states import (
     WAIT_SYMBOLS, WAIT_TOTAL_AMOUNT, WAIT_ALLOCATIONS,
     WAIT_REBALANCE_MODE, WAIT_TIME_INTERVAL, WAIT_THRESHOLD_PCT, WAIT_CONFIRM,
     WAIT_REPLACE_NEW_SYMBOL, WAIT_REPLACE_CONFIRM,
-    WAIT_DELETE_CONFIRM, WAIT_ADD_FUNDS_AMOUNT, WAIT_ADD_FUNDS_CONFIRM,
-    WAIT_REDUCE_FUNDS_AMOUNT, WAIT_REDUCE_FUNDS_CONFIRM,
+    WAIT_ADD_FUNDS_AMOUNT,
+    WAIT_REDUCE_FUNDS_AMOUNT,
 )
 from trading.rebalance_engine import get_engine, PortfolioConfig, AssetConfig
 from trading.bitget_client import get_bitget, invalidate_credentials_cache
@@ -830,237 +830,104 @@ async def cb_replace_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── حذف عملة ─────────────────────────────────────────────────────────────────
 
-async def cb_delete_asset_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _authorized(update):
-        return await _deny(update)
+async def cb_delete_asset_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     portfolio_id = q.data.replace("delete_asset_", "")
     engine = get_engine()
-    p = engine.get_portfolio(portfolio_id)
-    if not p:
-        await _reply(update, "❌ المحفظة غير موجودة.", back_main())
+    portfolio = engine._portfolios.get(portfolio_id)
+    if not portfolio:
+        await q.answer("المحفظة غير موجودة", show_alert=True)
         return
-    active = [a for a in p.assets if a.status == "active"]
-    if len(active) <= 1:
-        await _reply(update, "❌ لا يمكن حذف آخر عملة في المحفظة.", portfolio_actions_v2(portfolio_id))
-        return
-    await _reply(update,
-        f"🗑 <b>حذف عملة</b>\nاختر العملة التي تريد حذفها وبيعها:",
-        delete_asset_kb(portfolio_id, active))
+    assets = [a for a in portfolio.assets if a.status == "active"]
+    await q.edit_message_text("اختر العملة المراد حذفها:", reply_markup=delete_asset_kb(portfolio_id, assets))
 
+async def cb_delete_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.replace("delete_pick_", "").split("_", 1)
+    portfolio_id, symbol = parts[0], parts[1]
+    await q.edit_message_text(
+        f"هل أنت متأكد من حذف وبيع <b>{symbol.replace('USDT','')}</b>؟",
+        parse_mode="HTML",
+        reply_markup=confirm_delete_kb(portfolio_id, symbol)
+    )
 
-async def cb_delete_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _authorized(update):
-        return await _deny(update)
-    data = update.callback_query.data  # delete_pick_{pid}_{SYMBOL}
-    rest = data.replace("delete_pick_", "", 1)
-    if len(rest) < 37:
-        await _reply(update, "❌ بيانات غير صحيحة.", back_main())
-        return
-    pid = rest[:36]
-    symbol = rest[37:]
-    ctx.user_data["delete_pid"] = pid
-    ctx.user_data["delete_symbol"] = symbol
-    coin = symbol.replace("USDT", "")
-    await _reply(update,
-        f"🗑 تأكيد حذف <b>{coin}</b>\n\n"
-        "سيتم بيع العملة وإزالتها من المحفظة وإعادة توزيع النسب.",
-        confirm_delete_kb(pid, symbol))
-
-
-async def cb_delete_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _authorized(update):
-        return await _deny(update)
-    data = update.callback_query.data  # delete_ok_{pid}_{SYMBOL}
-    rest = data.replace("delete_ok_", "", 1)
-    pid = rest[:36]
-    symbol = rest[37:]
+async def cb_delete_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.replace("delete_ok_", "").split("_", 1)
+    portfolio_id, symbol = parts[0], parts[1]
     engine = get_engine()
-    p = engine.get_portfolio(pid)
-    if not p:
-        await _reply(update, "❌ المحفظة غير موجودة.", back_main())
+    portfolio = engine._portfolios.get(portfolio_id)
+    if not portfolio:
+        await q.answer("المحفظة غير موجودة", show_alert=True)
         return
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("⏳ جارٍ حذف العملة...")
-    try:
-        result = await asyncio.to_thread(engine.remove_asset, p, symbol)
-    except Exception as e:
-        await update.callback_query.message.reply_text(
-            f"❌ فشل الحذف:\n<code>{_html.escape(str(e))}</code>",
-            parse_mode="HTML", reply_markup=portfolio_actions_v2(pid))
-        return
-    if not result.get("ok"):
-        await _reply(update, f"❌ {result.get('msg', 'خطأ')}", portfolio_actions_v2(pid))
-        return
-    lines = ["✅ <b>تم الحذف بنجاح</b>\n"]
-    for a in result.get("actions", []):
-        lines.append(f"  • {a}")
-    if result.get("errors"):
-        lines.append("\n⚠️ أخطاء:")
-        for e in result["errors"]:
-            lines.append(f"  • {_html.escape(str(e)[:100])}")
-    await update.callback_query.message.reply_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=portfolio_actions_v2(pid))
+    result = engine.remove_asset(portfolio, symbol, sell=True)
+    msg = "\n".join(result.get("actions", []) + result.get("errors", []))
+    await q.edit_message_text(msg or "تم", reply_markup=portfolio_actions(portfolio_id))
 
 
 # ── زيادة الاستثمار ───────────────────────────────────────────────────────────
 
-async def cb_add_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _authorized(update):
-        await _deny(update)
-        return ConversationHandler.END
+async def cb_add_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     portfolio_id = q.data.replace("add_funds_", "")
     ctx.user_data["add_funds_pid"] = portfolio_id
-    await q.answer()
-    await q.edit_message_text(
-        "➕ <b>زيادة الاستثمار</b>\n\nأرسل المبلغ بالـ USDT الذي تريد إضافته:",
-        parse_mode="HTML")
+    await q.edit_message_text("أرسل المبلغ بالـ USDT الذي تريد إضافته:")
     return WAIT_ADD_FUNDS_AMOUNT
 
-
-async def got_add_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def got_add_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        amount = float(update.message.text.strip().replace(",", "."))
-    except ValueError:
-        await update.message.reply_text("❌ أرسل رقمًا صحيحًا:")
+        amount = float(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("❌ أدخل رقم صحيح")
         return WAIT_ADD_FUNDS_AMOUNT
-    ctx.user_data["add_funds_amount"] = amount
-    pid = ctx.user_data.get("add_funds_pid", "")
-    await update.message.reply_text(
-        f"➕ تأكيد إضافة <b>{amount:.2f} USDT</b> للمحفظة <code>{pid[:8]}</code>\n"
-        "سيتم توزيعها حسب النسب الحالية.",
-        parse_mode="HTML", reply_markup=confirm_cancel())
-    return WAIT_ADD_FUNDS_CONFIRM
-
-
-async def cb_add_funds_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _authorized(update):
-        await _deny(update)
-        return ConversationHandler.END
-    if update.callback_query.data == "cancel":
-        await _reply(update, "❌ تم الإلغاء.", main_menu())
-        ctx.user_data.clear()
-        return ConversationHandler.END
-    pid = ctx.user_data.get("add_funds_pid")
-    amount = ctx.user_data.get("add_funds_amount", 0)
+    pid = ctx.user_data["add_funds_pid"]
     engine = get_engine()
-    p = engine.get_portfolio(pid)
-    if not p:
-        await _reply(update, "❌ المحفظة غير موجودة.", main_menu())
-        return ConversationHandler.END
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("⏳ جارٍ توزيع المبلغ...")
-    try:
-        result = await asyncio.to_thread(engine.add_funds, p, amount)
-    except Exception as e:
-        await update.callback_query.message.reply_text(
-            f"❌ فشل:\n<code>{_html.escape(str(e))}</code>",
-            parse_mode="HTML", reply_markup=portfolio_actions_v2(pid))
-        ctx.user_data.clear()
-        return ConversationHandler.END
-    lines = [f"✅ <b>تمت إضافة {amount:.2f} USDT</b>\n"]
-    for a in result.get("actions", []):
-        lines.append(f"  • {a}")
-    if result.get("errors"):
-        lines.append("\n⚠️ أخطاء:")
-        for e in result["errors"]:
-            lines.append(f"  • {_html.escape(str(e)[:100])}")
-    await update.callback_query.message.reply_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=portfolio_actions_v2(pid))
-    ctx.user_data.clear()
+    portfolio = engine._portfolios.get(pid)
+    if portfolio:
+        result = engine.add_funds(portfolio, amount)
+        msg = "\n".join(result.get("actions", []) + result.get("errors", []))
+        await update.message.reply_text(msg or "تم", reply_markup=portfolio_actions(pid))
     return ConversationHandler.END
 
 
 # ── تخفيف الاستثمار ───────────────────────────────────────────────────────────
 
-async def cb_reduce_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _authorized(update):
-        await _deny(update)
-        return ConversationHandler.END
+async def cb_reduce_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     portfolio_id = q.data.replace("reduce_funds_", "")
     ctx.user_data["reduce_funds_pid"] = portfolio_id
-    await q.answer()
-    await q.edit_message_text(
-        "➖ <b>تخفيف الاستثمار</b>\n\nأرسل النسبة المئوية التي تريد بيعها (مثال: 20):",
-        parse_mode="HTML")
+    await q.edit_message_text("أرسل النسبة المئوية للتخفيف (مثال: 20):")
     return WAIT_REDUCE_FUNDS_AMOUNT
 
-
-async def got_reduce_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def got_reduce_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        pct = float(update.message.text.strip().replace(",", ".").replace("%", ""))
-        if not 1 <= pct <= 100:
-            raise ValueError()
-    except ValueError:
-        await update.message.reply_text("❌ أرسل نسبة بين 1 و 100:")
+        percent = float(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("❌ أدخل رقم صحيح")
         return WAIT_REDUCE_FUNDS_AMOUNT
-    ctx.user_data["reduce_funds_pct"] = pct
-    pid = ctx.user_data.get("reduce_funds_pid", "")
-    await update.message.reply_text(
-        f"➖ تأكيد بيع <b>{pct:.0f}%</b> من كل عملة في المحفظة <code>{pid[:8]}</code>",
-        parse_mode="HTML", reply_markup=confirm_cancel())
-    return WAIT_REDUCE_FUNDS_CONFIRM
-
-
-async def cb_reduce_funds_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _authorized(update):
-        await _deny(update)
-        return ConversationHandler.END
-    if update.callback_query.data == "cancel":
-        await _reply(update, "❌ تم الإلغاء.", main_menu())
-        ctx.user_data.clear()
-        return ConversationHandler.END
-    pid = ctx.user_data.get("reduce_funds_pid")
-    pct = ctx.user_data.get("reduce_funds_pct", 0)
+    pid = ctx.user_data["reduce_funds_pid"]
     engine = get_engine()
-    p = engine.get_portfolio(pid)
-    if not p:
-        await _reply(update, "❌ المحفظة غير موجودة.", main_menu())
-        return ConversationHandler.END
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("⏳ جارٍ البيع...")
-    try:
-        result = await asyncio.to_thread(engine.reduce_funds, p, pct)
-    except Exception as e:
-        await update.callback_query.message.reply_text(
-            f"❌ فشل:\n<code>{_html.escape(str(e))}</code>",
-            parse_mode="HTML", reply_markup=portfolio_actions_v2(pid))
-        ctx.user_data.clear()
-        return ConversationHandler.END
-    lines = [f"✅ <b>تم تخفيف {pct:.0f}%</b>\n"]
-    for a in result.get("actions", []):
-        lines.append(f"  • {a}")
-    if result.get("errors"):
-        lines.append("\n⚠️ أخطاء:")
-        for e in result["errors"]:
-            lines.append(f"  • {_html.escape(str(e)[:100])}")
-    await update.callback_query.message.reply_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=portfolio_actions_v2(pid))
-    ctx.user_data.clear()
+    portfolio = engine._portfolios.get(pid)
+    if portfolio:
+        result = engine.reduce_funds(portfolio, percent)
+        msg = "\n".join(result.get("actions", []) + result.get("errors", []))
+        await update.message.reply_text(msg or "تم", reply_markup=portfolio_actions(pid))
     return ConversationHandler.END
 
 
 # ── تقرير الأداء ──────────────────────────────────────────────────────────────
 
-async def cb_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _authorized(update):
-        return await _deny(update)
+async def cb_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     portfolio_id = q.data.replace("performance_", "")
     engine = get_engine()
-    p = engine.get_portfolio(portfolio_id)
-    if not p:
+    portfolio = engine._portfolios.get(portfolio_id)
+    if not portfolio:
         await q.answer("المحفظة غير موجودة", show_alert=True)
         return
-    await q.answer()
-    try:
-        report = await asyncio.to_thread(engine.performance_report, p)
-    except Exception as e:
-        await _reply(update, f"❌ فشل جلب التقرير:\n<code>{_html.escape(str(e))}</code>", portfolio_actions_v2(portfolio_id))
-        return
-    await _reply(update, report, portfolio_actions_v2(portfolio_id))
+    report = engine.performance_report(portfolio)
+    await q.edit_message_text(report, parse_mode="HTML", reply_markup=portfolio_actions(portfolio_id))
+
 
 # ── Cancel command ────────────────────────────────────────────────────────────
 
@@ -1139,12 +1006,32 @@ def build_application(app) -> None:
         allow_reentry=True,
     )
 
+    add_funds_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_add_funds_start, pattern=r"^add_funds_")],
+        states={
+            WAIT_ADD_FUNDS_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_add_funds_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
+    reduce_funds_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_reduce_funds_start, pattern=r"^reduce_funds_")],
+        states={
+            WAIT_REDUCE_FUNDS_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_reduce_funds_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(api_conv)
     app.add_handler(new_conv)
     app.add_handler(replace_conv)
+    app.add_handler(add_funds_conv)
+    app.add_handler(reduce_funds_conv)
 
     app.add_handler(CallbackQueryHandler(cb_main_menu, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(cb_active_portfolios, pattern="^active_portfolios$"))
@@ -1160,30 +1047,6 @@ def build_application(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_balance, pattern="^balance$"))
     app.add_handler(CallbackQueryHandler(cb_total_pnl, pattern="^total_pnl$"))
     app.add_handler(CallbackQueryHandler(cb_replace_start, pattern=r"^replace_[a-f0-9-]{36}$"))
-
-    # ── New feature handlers ──────────────────────────────────────────────────
-    add_funds_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_add_funds_start, pattern=r"^add_funds_")],
-        states={
-            WAIT_ADD_FUNDS_AMOUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_add_funds_amount)],
-            WAIT_ADD_FUNDS_CONFIRM: [CallbackQueryHandler(cb_add_funds_confirm, pattern="^(confirm|cancel)$")],
-        },
-        fallbacks=[CommandHandler("cancel", cmd_cancel)],
-        allow_reentry=True,
-    )
-
-    reduce_funds_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_reduce_funds_start, pattern=r"^reduce_funds_")],
-        states={
-            WAIT_REDUCE_FUNDS_AMOUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_reduce_funds_amount)],
-            WAIT_REDUCE_FUNDS_CONFIRM: [CallbackQueryHandler(cb_reduce_funds_confirm, pattern="^(confirm|cancel)$")],
-        },
-        fallbacks=[CommandHandler("cancel", cmd_cancel)],
-        allow_reentry=True,
-    )
-
-    app.add_handler(add_funds_conv)
-    app.add_handler(reduce_funds_conv)
     app.add_handler(CallbackQueryHandler(cb_delete_asset_start, pattern=r"^delete_asset_"))
     app.add_handler(CallbackQueryHandler(cb_delete_pick, pattern=r"^delete_pick_"))
     app.add_handler(CallbackQueryHandler(cb_delete_ok, pattern=r"^delete_ok_"))

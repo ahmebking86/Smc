@@ -496,14 +496,11 @@ class RebalanceEngine:
 
     # ── حذف عملة ──────────────────────────────────────────────────────────────
 
-    def remove_asset(self, portfolio: "Portfolio", symbol: str, sell: bool = True) -> dict:
-        """يحذف عملة من المحفظة (يبيعها ويعيد توزيع النسب)."""
+    def remove_asset(self, portfolio, symbol: str, sell: bool = True) -> dict:
         asset = next((a for a in portfolio.assets if a.symbol == symbol and a.status == "active"), None)
         if not asset:
-            return {"ok": False, "msg": f"العملة {symbol} غير موجودة أو غير نشطة"}
-
+            return {"ok": False, "msg": f"العملة {symbol} غير موجودة"}
         result = {"ok": True, "actions": [], "errors": []}
-
         if sell:
             try:
                 balances = self._get_balances()
@@ -518,27 +515,19 @@ class RebalanceEngine:
                         result["actions"].append(f"🔴 تم بيع {coin}: {sell_qty}")
             except Exception as e:
                 result["errors"].append(str(e))
-
         remaining = [a for a in portfolio.assets if a.symbol != symbol and a.status == "active"]
         if not remaining:
-            return {"ok": False, "msg": "لا يمكن حذف آخر عملة في المحفظة"}
-
+            return {"ok": False, "msg": "لا يمكن حذف آخر عملة"}
         total_pct = sum(a.target_pct for a in remaining)
         for a in remaining:
             a.target_pct = round(a.target_pct / total_pct * 100, 2)
-
         asset.status = "closed"
-        db.deactivate_asset(asset.id)
-        result["actions"].append(f"✅ تم حذف {symbol.replace('USDT', '')} وإعادة توزيع النسب")
+        result["actions"].append(f"✅ تم حذف {symbol.replace('USDT','')}")
         return result
 
-    # ── زيادة الاستثمار ────────────────────────────────────────────────────────
-
-    def add_funds(self, portfolio: "Portfolio", amount: float) -> dict:
-        """يوزع مبلغ جديد حسب النسب الحالية."""
+    def add_funds(self, portfolio, amount: float) -> dict:
         if amount < MIN_ORDER_USDT:
-            return {"ok": False, "msg": f"المبلغ أقل من الحد الأدنى {MIN_ORDER_USDT}"}
-
+            return {"ok": False, "msg": f"المبلغ أقل من {MIN_ORDER_USDT}"}
         actions, errors = [], []
         for asset in portfolio.assets:
             if asset.status != "active":
@@ -552,21 +541,14 @@ class RebalanceEngine:
                 time.sleep(0.3)
             except Exception as e:
                 errors.append(f"{asset.symbol}: {e}")
-
         portfolio.config.total_investment += amount
-        db.update_portfolio(portfolio.id, {"total_investment": portfolio.config.total_investment})
         return {"ok": True, "actions": actions, "errors": errors}
 
-    # ── تخفيف الاستثمار ────────────────────────────────────────────────────────
-
-    def reduce_funds(self, portfolio: "Portfolio", percent: float) -> dict:
-        """يبيع نسبة مئوية من كل عملة."""
+    def reduce_funds(self, portfolio, percent: float) -> dict:
         if percent <= 0 or percent > 100:
-            return {"ok": False, "msg": "النسبة يجب أن تكون بين 1 و 100"}
-
+            return {"ok": False, "msg": "النسبة بين 1 و 100"}
         snap = self.snapshot(portfolio)
         actions, errors = [], []
-
         for a in snap["assets"]:
             sell_value = a["value"] * (percent / 100.0)
             if sell_value < MIN_ORDER_USDT:
@@ -579,34 +561,23 @@ class RebalanceEngine:
                 if sell_qty * price < MIN_ORDER_USDT:
                     continue
                 self.client.place_market_sell(a["symbol"], sell_qty, qty_places)
-                actions.append(f"🔴 {a['coin']}: بيع ≈ {sell_value:.2f} USDT")
+                actions.append(f"🔴 {a['coin']}: ≈ {sell_value:.2f} USDT")
                 time.sleep(0.3)
             except Exception as e:
                 errors.append(f"{a['coin']}: {e}")
-
         portfolio.config.total_investment *= (1 - percent / 100)
-        db.update_portfolio(portfolio.id, {"total_investment": portfolio.config.total_investment})
         return {"ok": True, "actions": actions, "errors": errors}
 
-    # ── تقرير الأداء ───────────────────────────────────────────────────────────
-
-    def performance_report(self, portfolio: "Portfolio") -> str:
-        """يرجع نص تقرير مرتب حسب الأداء."""
+    def performance_report(self, portfolio) -> str:
         snap = self.snapshot(portfolio)
         lines = ["📈 <b>تقرير أداء المحفظة</b>\n"]
-        ranked = []
-
-        for a in snap["assets"]:
-            ranked.append((a["coin"], a["value"], a["current_pct"], a["deviation"]))
-
-        ranked.sort(key=lambda x: x[2], reverse=True)
-
-        for i, (coin, value, pct, dev) in enumerate(ranked, 1):
-            emoji = "🟢" if dev >= 0 else "🔴"
-            lines.append(f"{i}. {emoji} <b>{coin}</b> — {value:.2f} USDT ({pct:.1f}%) انحراف {dev:+.1f}%")
-
+        ranked = sorted(snap["assets"], key=lambda x: x["current_pct"], reverse=True)
+        for i, a in enumerate(ranked, 1):
+            emoji = "🟢" if a["deviation"] >= 0 else "🔴"
+            lines.append(f"{i}. {emoji} <b>{a['coin']}</b> — {a['value']:.2f} USDT ({a['current_pct']:.1f}%) انحراف {a['deviation']:+.1f}%")
         lines.append(f"\n💰 القيمة الإجمالية: <b>{snap['total_value']:.2f} USDT</b>")
         return "\n".join(lines)
+
 
     # ── Load / manage ─────────────────────────────────────────────────────────
 
