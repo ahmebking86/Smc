@@ -19,4 +19,11 @@
     WAIT_REPLACE_NEW_SYMBOL,
     WAIT_REPLACE_CONFIRM,
 
-) = range(12)
+    # ── New features ─────────────────────────────────────────────────────────
+    WAIT_DELETE_CONFIRM,
+    WAIT_ADD_FUNDS_AMOUNT,
+    WAIT_ADD_FUNDS_CONFIRM,
+    WAIT_REDUCE_FUNDS_AMOUNT,
+    WAIT_REDUCE_FUNDS_CONFIRM,
+
+) = range(17)
