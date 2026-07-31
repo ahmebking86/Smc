@@ -81,26 +81,62 @@ class RebalanceEngine:
     # ── Active portfolios (FIX for monitor crash) ─────────────────────────────
 
     def all_active(self) -> list[Portfolio]:
-        """Return all portfolios currently marked active (used by monitor)."""
-        return [p for p in self._portfolios.values() if p.status == "active"]
+        """Return active portfolios from ALL exchange engines (used by monitor)."""
+        result = []
+        seen = set()
+        engines = list(_engines.values()) or [self]
+        for eng in engines:
+            for p in eng._portfolios.values():
+                if p.status == "active" and p.id not in seen:
+                    seen.add(p.id)
+                    result.append(p)
+        return result
 
     def load_from_db(self) -> None:
-        """Load every active/paused portfolio from DB into memory."""
-        self._portfolios.clear()
+        """Load every active/paused portfolio into the correct exchange engine."""
         rows = db.list_active_portfolios()
+        total = 0
         for row in rows:
             try:
-                self.load_portfolio(row["id"])
+                exchange = (row.get("exchange") or "bitget").lower()
+                eng = get_engine(exchange)
+                if eng.load_portfolio(row["id"]):
+                    total += 1
             except Exception as e:
                 logger.error("Failed to load portfolio %s: %s", row.get("id", "?")[:8], e)
-        logger.info("Loaded %d portfolios from DB", len(self._portfolios))
+        logger.info("Loaded %d portfolios from DB", total)
 
 
     def get_portfolio(self, portfolio_id: str) -> Optional[Portfolio]:
-        return self._portfolios.get(portfolio_id)
+        """Find portfolio in this engine, any other engine, or load from DB."""
+        p = self._portfolios.get(portfolio_id)
+        if p:
+            return p
+        # search other engines (mexc vs bitget)
+        for eng in list(_engines.values()):
+            if eng is self:
+                continue
+            p = eng._portfolios.get(portfolio_id)
+            if p:
+                return p
+        # not in memory — try DB
+        row = db.get_portfolio(portfolio_id)
+        if not row or row.get("status") == "closed":
+            return None
+        exchange = (row.get("exchange") or "bitget").lower()
+        eng = get_engine(exchange)
+        return eng.load_portfolio(portfolio_id)
 
     def all_portfolios(self) -> list[Portfolio]:
-        return list(self._portfolios.values())
+        # merge from all engines
+        seen = set()
+        out = []
+        for eng in list(_engines.values()):
+            for p in eng._portfolios.values():
+                if p.id not in seen:
+                    seen.add(p.id)
+                    out.append(p)
+        return out
 
     # ── Create ────────────────────────────────────────────────────────────────
 
@@ -108,7 +144,7 @@ class RebalanceEngine:
         self.set_exchange(config.exchange or "bitget")
         if not self.client.has_credentials():
             raise RuntimeError(
-                f"مفاتيح {self.client.exchange_name} API غير مُعيَّنة.\n"
+                f"مفاتيح {(getattr(self.client, 'exchange_name', None) or self.exchange).upper()} API غير مُعيَّنة.\n"
                 "اضغط 🔑 إعداد API من القائمة الرئيسية."
             )
         if len(config.assets) == 0 or len(config.assets) > MAX_ASSETS:
