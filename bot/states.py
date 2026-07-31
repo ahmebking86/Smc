@@ -2,25 +2,29 @@
 
 (
     # ── API setup ────────────────────────────────────────────────────────────
+    WAIT_EXCHANGE_CHOICE,   # bitget | mexc
     WAIT_API_KEY,
     WAIT_API_SECRET,
-    WAIT_PASSPHRASE,          # Bitget only
+    WAIT_PASSPHRASE,        # BitGet only
 
     # ── Create rebalance portfolio ───────────────────────────────────────────
-    WAIT_SYMBOLS,
-    WAIT_TOTAL_AMOUNT,
-    WAIT_ALLOCATIONS,
-    WAIT_REBALANCE_MODE,
-    WAIT_TIME_INTERVAL,
-    WAIT_THRESHOLD_PCT,
-    WAIT_CONFIRM,
+    WAIT_SYMBOLS,           # enter up to 20 coins
+    WAIT_TOTAL_AMOUNT,      # total USDT to invest
+    WAIT_ALLOCATIONS,       # percentages for each coin (must sum 100%)
+    WAIT_REBALANCE_MODE,    # time | percent
+    WAIT_TIME_INTERVAL,     # hours between rebalances
+    WAIT_THRESHOLD_PCT,     # deviation % that triggers rebalance
+    WAIT_CONFIRM,           # final confirmation
 
     # ── Replace asset ────────────────────────────────────────────────────────
     WAIT_REPLACE_NEW_SYMBOL,
     WAIT_REPLACE_CONFIRM,
 
-    # ── Extra features ───────────────────────────────────────────────────────
+    # ── New features ─────────────────────────────────────────────────────────
+    WAIT_DELETE_CONFIRM,
     WAIT_ADD_FUNDS_AMOUNT,
+    WAIT_ADD_FUNDS_CONFIRM,
     WAIT_REDUCE_FUNDS_AMOUNT,
+    WAIT_REDUCE_FUNDS_CONFIRM,
 
-) = range(14)
+) = range(18)

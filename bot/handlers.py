@@ -21,8 +21,10 @@ from bot.keyboards import (
     rebalance_mode_kb, portfolios_list, portfolio_actions,
     close_confirm, replace_asset_kb, delete_asset_kb, confirm_delete_kb,
     exchange_select_kb, portfolio_actions_v2,
+    exchange_choice_kb,
 )
 from bot.states import (
+    WAIT_EXCHANGE_CHOICE,
     WAIT_API_KEY, WAIT_API_SECRET, WAIT_PASSPHRASE,
     WAIT_SYMBOLS, WAIT_TOTAL_AMOUNT, WAIT_ALLOCATIONS,
     WAIT_REBALANCE_MODE, WAIT_TIME_INTERVAL, WAIT_THRESHOLD_PCT, WAIT_CONFIRM,
@@ -93,9 +95,7 @@ async def cb_main_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, ctx)
 
 
-# ── API setup ─────────────────────────────────────────────────────────────────
-
-# ── API setup (Bitget + MEXC) ─────────────────────────────────────────────────
+# ── API setup (BitGet + MEXC) ─────────────────────────────────────────────────
 
 async def cb_setup_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not _authorized(update):
@@ -104,22 +104,40 @@ async def cb_setup_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await _reply(update,
         "🔑 <b>إعداد مفاتيح API</b>\n\n"
         "اختر المنصة:",
-        exchange_select_kb("api"))
-    return ConversationHandler.END
+        exchange_choice_kb())
+    return WAIT_EXCHANGE_CHOICE
+
+
+async def cb_api_exchange(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    if q.data == "api_exchange_bitget":
+        ctx.user_data["api_exchange"] = "bitget"
+        name = "BitGet"
+    else:
+        ctx.user_data["api_exchange"] = "mexc"
+        name = "MEXC"
+    await q.edit_message_text(
+        f"🔑 <b>إعداد مفاتيح {name}</b>\n\n"
+        "أرسل <b>API Key</b>:\n"
+        "(يمكنك إلغاء العملية بـ /cancel)",
+        parse_mode="HTML",
+        reply_markup=back_main(),
+    )
+    return WAIT_API_KEY
 
 
 async def cb_choose_exchange_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Legacy handler for exch_api_ pattern."""
     if not _authorized(update):
         await _deny(update)
         return ConversationHandler.END
     q = update.callback_query
     await q.answer()
-    data = q.data  # exch_api_bitget | exch_api_mexc
-    exchange = "mexc" if "mexc" in data else "bitget"
+    exchange = "mexc" if "mexc" in q.data else "bitget"
     ctx.user_data.clear()
     ctx.user_data["api_exchange"] = exchange
-
-    name = "MEXC" if exchange == "mexc" else "Bitget"
+    name = "MEXC" if exchange == "mexc" else "BitGet"
     await _reply(update,
         f"🔑 <b>إعداد مفاتيح {name}</b>\n\n"
         "أرسل <b>API Key</b>:\n"
@@ -130,10 +148,6 @@ async def cb_choose_exchange_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 
 async def got_api_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data["api_key"] = update.message.text.strip()
-    exchange = ctx.user_data.get("api_exchange", "bitget")
-    if exchange == "mexc":
-        await update.message.reply_text("أرسل <b>API Secret</b>:", parse_mode="HTML")
-        return WAIT_API_SECRET
     await update.message.reply_text("أرسل <b>API Secret</b>:", parse_mode="HTML")
     return WAIT_API_SECRET
 
@@ -1017,6 +1031,9 @@ def build_application(app) -> None:
     api_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_setup_api, pattern="^setup_api$")],
         states={
+            WAIT_EXCHANGE_CHOICE: [
+                CallbackQueryHandler(cb_api_exchange, pattern=r"^api_exchange_(bitget|mexc)$"),
+            ],
             WAIT_API_KEY:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_key)],
             WAIT_API_SECRET:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_secret)],
             WAIT_PASSPHRASE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_passphrase)],

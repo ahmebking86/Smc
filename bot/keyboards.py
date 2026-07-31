@@ -1,4 +1,4 @@
-"""All Telegram inline keyboard builders — Bitget + MEXC support."""
+"""All Telegram inline keyboard builders."""
 
 from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,17 +26,18 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def exchange_select_kb(purpose: str = "api") -> InlineKeyboardMarkup:
-    """
-    purpose: "api"  → اختيار المنصة لإعداد المفاتيح
-             "new"  → اختيار المنصة لإنشاء محفظة
-    """
+def exchange_choice_kb() -> InlineKeyboardMarkup:
+    """اختيار المنصة عند إعداد API."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔵 Bitget", callback_data=f"exch_{purpose}_bitget"),
-            InlineKeyboardButton("🟠 MEXC",   callback_data=f"exch_{purpose}_mexc"),
+            InlineKeyboardButton("🟡 BitGet", callback_data="api_exchange_bitget"),
         ],
-        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+        [
+            InlineKeyboardButton("🔵 MEXC", callback_data="api_exchange_mexc"),
+        ],
+        [
+            InlineKeyboardButton("❌ إلغاء", callback_data="main_menu"),
+        ],
     ])
 
 
@@ -89,33 +90,14 @@ def portfolios_list(portfolios: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for p in portfolios:
         status = "🟢" if p.get("status") == "active" else "⏸️"
-        exch = (p.get("exchange") or "bitget").upper()
-        label = f"{status} [{exch}] {p['id'][:8]} — {p.get('asset_count', 0)} عملة"
+        label  = f"{status} محفظة {p['id'][:8]} — {p.get('asset_count', 0)} عملة"
         rows.append([InlineKeyboardButton(label, callback_data=f"portfolio_{p['id']}")])
     rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
 
 def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 تحديث / إعادة توازن الآن", callback_data=f"rebalance_now_{portfolio_id}"),
-        ],
-        [
-            InlineKeyboardButton("🔁 استبدال عملة", callback_data=f"replace_{portfolio_id}"),
-        ],
-        [
-            InlineKeyboardButton("📊 التفاصيل", callback_data=f"portfolio_{portfolio_id}"),
-            InlineKeyboardButton("⏸️ إيقاف مؤقت", callback_data=f"pause_{portfolio_id}"),
-        ],
-        [
-            InlineKeyboardButton("🗑 إغلاق المحفظة", callback_data=f"close_{portfolio_id}"),
-        ],
-        [InlineKeyboardButton("🔙 العودة للمحافظ", callback_data="active_portfolios")],
-    ])
-
-
-def portfolio_actions_v2(portfolio_id: str) -> InlineKeyboardMarkup:
+    """أزرار المحفظة مع الميزات الجديدة."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 تحديث / إعادة توازن الآن", callback_data=f"rebalance_now_{portfolio_id}"),
@@ -162,13 +144,15 @@ def asset_close_kb(portfolio_id: str, symbol: str) -> InlineKeyboardMarkup:
 
 
 def replace_asset_kb(portfolio_id: str, assets: list) -> InlineKeyboardMarkup:
+    """أزرار اختيار العملة المراد استبدالها."""
     rows = []
     for a in assets:
-        coin = a.symbol.replace("USDT", "")
+        coin = a.symbol.replace("USDT", "") if hasattr(a, "symbol") else str(a).replace("USDT", "")
+        symbol = a.symbol if hasattr(a, "symbol") else a
         rows.append([
             InlineKeyboardButton(
                 f"🔁 استبدال {coin}",
-                callback_data=f"replace_pick_{portfolio_id}_{a.symbol}"
+                callback_data=f"replace_pick_{portfolio_id}_{symbol}"
             )
         ])
     rows.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"portfolio_{portfolio_id}")])
@@ -176,6 +160,7 @@ def replace_asset_kb(portfolio_id: str, assets: list) -> InlineKeyboardMarkup:
 
 
 def delete_asset_kb(portfolio_id: str, assets: list) -> InlineKeyboardMarkup:
+    """أزرار اختيار العملة المراد حذفها."""
     rows = []
     for a in assets:
         coin = a.symbol.replace("USDT", "") if hasattr(a, "symbol") else str(a).replace("USDT", "")
