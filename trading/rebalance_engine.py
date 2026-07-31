@@ -2,6 +2,7 @@
 Portfolio Rebalancing Engine — supports Bitget + MEXC.
 Creates a portfolio of up to 20 coins, rebalances by time or deviation %.
 Includes robust replace_asset method.
+FIXED: added all_active() + load_from_db() (were missing → monitor crash)
 """
 
 from __future__ import annotations
@@ -76,6 +77,23 @@ class RebalanceEngine:
     def set_exchange(self, exchange: str) -> None:
         self.exchange = exchange.lower()
         self.client = _get_client(self.exchange)
+
+    # ── Active portfolios (FIX for monitor crash) ─────────────────────────────
+
+    def all_active(self) -> list[Portfolio]:
+        """Return all portfolios currently marked active (used by monitor)."""
+        return [p for p in self._portfolios.values() if p.status == "active"]
+
+    def load_from_db(self) -> None:
+        """Load every active/paused portfolio from DB into memory."""
+        self._portfolios.clear()
+        rows = db.list_active_portfolios()
+        for row in rows:
+            try:
+                self.load_portfolio(row["id"])
+            except Exception as e:
+                logger.error("Failed to load portfolio %s: %s", row.get("id", "?")[:8], e)
+        logger.info("Loaded %d portfolios from DB", len(self._portfolios))
 
     # ── Create ────────────────────────────────────────────────────────────────
 
@@ -529,6 +547,7 @@ class RebalanceEngine:
         row = db.get_portfolio(portfolio_id)
         if not row:
             return None
+        # db.py uses get_portfolio_assets (not get_assets)
         assets_rows = db.get_portfolio_assets(portfolio_id)
         exchange = row.get("exchange") or "bitget"
         config = PortfolioConfig(
@@ -548,7 +567,9 @@ class RebalanceEngine:
         )
         if row.get("last_rebalance_at"):
             try:
-                portfolio.last_rebalance_at = datetime.fromisoformat(row["last_rebalance_at"].replace("Z", "+00:00"))
+                portfolio.last_rebalance_at = datetime.fromisoformat(
+                    str(row["last_rebalance_at"]).replace("Z", "+00:00")
+                )
             except Exception:
                 pass
         for a in assets_rows:
@@ -561,64 +582,6 @@ class RebalanceEngine:
             ))
         self._portfolios[portfolio_id] = portfolio
         return portfolio
-
-    # ── Load all ──────────────────────────────────────────────────────────────
-
-    def load_from_db(self) -> None:
-        """Load all active portfolios from DB into memory (for all exchanges)."""
-        try:
-            rows = db.list_active_portfolios()
-        except Exception as e:
-            logger.error("list_active_portfolios failed: %s", e)
-            return
-
-        for row in rows:
-            try:
-                pid = row["id"]
-                exchange = (row.get("exchange") or "bitget").lower()
-                assets_rows = db.get_portfolio_assets(pid) if hasattr(db, "get_portfolio_assets") else db.get_assets(pid)
-
-                assets = [
-                    PortfolioAsset(
-                        id=a["id"],
-                        symbol=a["symbol"],
-                        target_pct=float(a["target_pct"]),
-                        initial_qty=float(a.get("initial_qty") or 0),
-                        status=a.get("status") or "active",
-                    )
-                    for a in assets_rows
-                ]
-
-                cfg = PortfolioConfig(
-                    total_investment=float(row.get("total_investment") or 0),
-                    assets=[AssetConfig(a.symbol, a.target_pct) for a in assets if a.status == "active"],
-                    rebalance_mode=row.get("rebalance_mode") or "time",
-                    interval_hours=float(row.get("interval_hours") or 0),
-                    threshold_pct=float(row.get("threshold_pct") or 0),
-                    exchange=exchange,
-                )
-
-                last_rb = row.get("last_rebalance_at")
-                if isinstance(last_rb, str):
-                    try:
-                        last_rb = datetime.fromisoformat(last_rb.replace("Z", "+00:00"))
-                    except Exception:
-                        last_rb = None
-
-                p = Portfolio(
-                    id=pid,
-                    config=cfg,
-                    assets=assets,
-                    total_pnl=float(row.get("total_pnl") or 0),
-                    status=row.get("status") or "active",
-                    last_rebalance_at=last_rb,
-                    exchange=exchange,
-                )
-                self._portfolios[pid] = p
-            except Exception as e:
-                logger.error("Failed to load portfolio %s: %s", row.get("id"), e)
-
-        logger.info("Loaded %d portfolios from DB", len(self._portfolios))
 
 
 _engines: dict[str, RebalanceEngine] = {}
