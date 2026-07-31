@@ -1,4 +1,6 @@
-"""All Telegram inline keyboard builders — Bitget + MEXC support."""
+"""All Telegram inline keyboard builders — Bitget + MEXC support.
+يصدّر كل الأسماء اللي handlers ممكن يستوردها (aliases).
+"""
 
 from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,10 +29,7 @@ def main_menu() -> InlineKeyboardMarkup:
 
 
 def exchange_select_kb(purpose: str = "api") -> InlineKeyboardMarkup:
-    """
-    purpose: "api"  → اختيار المنصة لإعداد المفاتيح
-             "new"  → اختيار المنصة لإنشاء محفظة
-    """
+    """اختيار المنصة — الاسم اللي handlers بيستورده."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🟡 BitGet", callback_data=f"exch_{purpose}_bitget"),
@@ -40,8 +39,8 @@ def exchange_select_kb(purpose: str = "api") -> InlineKeyboardMarkup:
     ])
 
 
-# alias — عشان أي handlers يستورد أي اسم من الاتنين يشتغل
 def exchange_choice_kb() -> InlineKeyboardMarkup:
+    """alias"""
     return exchange_select_kb("api")
 
 
@@ -102,6 +101,7 @@ def portfolios_list(portfolios: list[dict]) -> InlineKeyboardMarkup:
 
 
 def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
+    """أزرار المحفظة الكاملة."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 تحديث / إعادة توازن الآن", callback_data=f"rebalance_now_{portfolio_id}"),
@@ -126,6 +126,11 @@ def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("🔙 العودة للمحافظ", callback_data="active_portfolios")],
     ])
+
+
+def portfolio_actions_v2(portfolio_id: str) -> InlineKeyboardMarkup:
+    """alias — handlers بيستورد portfolio_actions_v2"""
+    return portfolio_actions(portfolio_id)
 
 
 def close_confirm(portfolio_id: str) -> InlineKeyboardMarkup:
