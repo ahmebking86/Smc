@@ -953,7 +953,7 @@ async def cb_delete_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not portfolio:
         await q.answer("المحفظة غير موجودة", show_alert=True)
         return
-    result = engine.remove_asset(portfolio, symbol, sell=True)
+    result = await asyncio.to_thread(engine.remove_asset, portfolio, symbol, True)
     msg = "\n".join(result.get("actions", []) + result.get("errors", []))
     await q.edit_message_text(msg or "تم", reply_markup=portfolio_actions(portfolio_id))
 
@@ -970,43 +970,68 @@ async def cb_add_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def got_add_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        amount = float(update.message.text.strip())
+        amount = float(update.message.text.strip().replace(",", ""))
+        if amount <= 0:
+            raise ValueError()
     except Exception:
-        await update.message.reply_text("❌ أدخل رقم صحيح")
+        await update.message.reply_text("❌ أدخل رقم صحيح أكبر من صفر:")
         return WAIT_ADD_FUNDS_AMOUNT
-    pid = ctx.user_data["add_funds_pid"]
+    pid = ctx.user_data.get("add_funds_pid")
     engine = get_engine()
-    portfolio = engine._portfolios.get(pid)
-    if portfolio:
-        result = engine.add_funds(portfolio, amount)
-        msg = "\n".join(result.get("actions", []) + result.get("errors", []))
-        await update.message.reply_text(msg or "تم", reply_markup=portfolio_actions(pid))
+    portfolio = engine.get_portfolio(pid) if hasattr(engine, "get_portfolio") else engine._portfolios.get(pid)
+    if not portfolio:
+        await update.message.reply_text("❌ المحفظة غير موجودة.", reply_markup=back_main())
+        return ConversationHandler.END
+    try:
+        result = await asyncio.to_thread(engine.add_funds, portfolio, amount)
+    except Exception as e:
+        await update.message.reply_text(f"❌ فشل: {_html.escape(str(e))}", parse_mode="HTML", reply_markup=portfolio_actions(pid))
+        return ConversationHandler.END
+    msg = "\n".join(result.get("actions", []) + result.get("errors", []))
+    await update.message.reply_text(msg or f"✅ تم إضافة {amount} USDT", reply_markup=portfolio_actions(pid))
     return ConversationHandler.END
 
 
 # ── تخفيف الاستثمار ───────────────────────────────────────────────────────────
 
 async def cb_reduce_funds_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _authorized(update):
+        await _deny(update)
+        return ConversationHandler.END
     q = update.callback_query
+    await q.answer()
     portfolio_id = q.data.replace("reduce_funds_", "")
     ctx.user_data["reduce_funds_pid"] = portfolio_id
-    await q.edit_message_text("أرسل النسبة المئوية للتخفيف (مثال: 20):")
+    await q.edit_message_text(
+        "➖ <b>تخفيف الاستثمار</b>\n\n"
+        "أرسل المبلغ بالـ USDT اللي عايز تسحبه من المحفظة:\n"
+        "مثال: <code>50</code>",
+        parse_mode="HTML"
+    )
     return WAIT_REDUCE_FUNDS_AMOUNT
 
 
 async def got_reduce_funds_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        percent = float(update.message.text.strip())
+        amount = float(update.message.text.strip().replace(",", ""))
+        if amount <= 0:
+            raise ValueError()
     except Exception:
-        await update.message.reply_text("❌ أدخل رقم صحيح")
+        await update.message.reply_text("❌ أدخل رقم صحيح أكبر من صفر:")
         return WAIT_REDUCE_FUNDS_AMOUNT
-    pid = ctx.user_data["reduce_funds_pid"]
+    pid = ctx.user_data.get("reduce_funds_pid")
     engine = get_engine()
-    portfolio = engine._portfolios.get(pid)
-    if portfolio:
-        result = engine.reduce_funds(portfolio, percent)
-        msg = "\n".join(result.get("actions", []) + result.get("errors", []))
-        await update.message.reply_text(msg or "تم", reply_markup=portfolio_actions(pid))
+    portfolio = engine.get_portfolio(pid) if hasattr(engine, "get_portfolio") else engine._portfolios.get(pid)
+    if not portfolio:
+        await update.message.reply_text("❌ المحفظة غير موجودة.", reply_markup=back_main())
+        return ConversationHandler.END
+    try:
+        result = await asyncio.to_thread(engine.reduce_funds, portfolio, amount)
+    except Exception as e:
+        await update.message.reply_text(f"❌ فشل: {_html.escape(str(e))}", parse_mode="HTML", reply_markup=portfolio_actions(pid))
+        return ConversationHandler.END
+    msg = "\n".join(result.get("actions", []) + result.get("errors", []))
+    await update.message.reply_text(msg or f"✅ تم سحب {amount} USDT", reply_markup=portfolio_actions(pid))
     return ConversationHandler.END
 
 
