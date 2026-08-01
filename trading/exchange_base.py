@@ -1,7 +1,4 @@
-"""
-Abstract exchange client interface.
-Both BitgetClient and MexcClient implement this.
-"""
+"""Abstract exchange client interface for the MEXC client."""
 
 from __future__ import annotations
 from abc import ABC, abstractmethod

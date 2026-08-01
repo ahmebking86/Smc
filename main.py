@@ -1,6 +1,5 @@
 """
-Entry point — Rebalance Portfolio Bot for BitGet via Telegram.
-Fixed: better Conflict handling, clean monitor lifecycle, drop_pending_updates.
+Entry point — MEXC portfolio rebalancing bot via Telegram.
 """
 
 import asyncio

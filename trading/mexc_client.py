@@ -1,8 +1,4 @@
-"""
-MEXC Spot REST API client — for portfolio rebalancing bot.
-No passphrase required (unlike BitGet).
-Fixed: signature encoding (700002).
-"""
+"""MEXC Spot REST API client for the portfolio rebalancing bot."""
 
 from __future__ import annotations
 import hashlib

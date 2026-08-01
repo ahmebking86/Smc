@@ -1,4 +1,4 @@
-"""All Telegram inline keyboard builders — Bitget + MEXC support."""
+"""All Telegram inline keyboard builders for the MEXC portfolio bot."""
 
 from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,31 +23,6 @@ def main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🛑 إيقاف الكل",   callback_data="close_all_confirm"),
             InlineKeyboardButton("🧹 تصفية USDT",   callback_data="liquidate_confirm"),
         ],
-    ])
-
-
-def exchange_choice_kb() -> InlineKeyboardMarkup:
-    """أزرار اختيار المنصة لإعداد API — callback يطابق handlers."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🟡 BitGet", callback_data="api_exchange_bitget"),
-            InlineKeyboardButton("🔵 MEXC",   callback_data="api_exchange_mexc"),
-        ],
-        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
-    ])
-
-
-def exchange_select_kb(purpose: str = "api") -> InlineKeyboardMarkup:
-    """اختيار المنصة لإنشاء محفظة أو API."""
-    if purpose == "api":
-        return exchange_choice_kb()
-    # purpose == "new"
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🟡 BitGet", callback_data="exch_new_bitget"),
-            InlineKeyboardButton("🔵 MEXC",   callback_data="exch_new_mexc"),
-        ],
-        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
     ])
 
 
@@ -100,7 +75,7 @@ def portfolios_list(portfolios: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for p in portfolios:
         status = "🟢" if p.get("status") == "active" else "⏸️"
-        exch = (p.get("exchange") or "bitget").upper()
+        exch = (p.get("exchange") or "mexc").upper()
         label = f"{status} [{exch}] {p['id'][:8]} — {p.get('asset_count', 0)} عملة"
         rows.append([InlineKeyboardButton(label, callback_data=f"portfolio_{p['id']}")])
     rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")])

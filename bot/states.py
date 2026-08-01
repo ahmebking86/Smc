@@ -2,10 +2,8 @@
 
 (
     # ── API setup ────────────────────────────────────────────────────────────
-    WAIT_EXCHANGE_CHOICE,   # bitget | mexc
     WAIT_API_KEY,
     WAIT_API_SECRET,
-    WAIT_PASSPHRASE,        # BitGet only
 
     # ── Create rebalance portfolio ───────────────────────────────────────────
     WAIT_SYMBOLS,           # enter up to 20 coins
@@ -32,4 +30,4 @@
     WAIT_ADD_ASSET_AMOUNT,
     WAIT_ADD_ASSET_CONFIRM,
 
-) = range(21)
+) = range(19)

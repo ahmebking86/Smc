@@ -19,12 +19,6 @@ TELEGRAM_CHAT_ID = int(_require("TELEGRAM_CHAT_ID"))
 # ── PostgreSQL (Railway) ───────────────────────────────────────────────────────
 DATABASE_URL = _require("DATABASE_URL")
 
-# ── BitGet API ────────────────────────────────────────────────────────────────
-BITGET_API_KEY    = os.getenv("BITGET_API_KEY", "")
-BITGET_API_SECRET = os.getenv("BITGET_API_SECRET", "")
-BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
-BITGET_BASE_URL   = "https://api.bitget.com"
-
 # ── App ───────────────────────────────────────────────────────────────────────
 MONITOR_INTERVAL   = 30       # seconds between rebalance checks
 MIN_ORDER_USDT     = 1.5      # minimum USDT for any market order (safety buffer)

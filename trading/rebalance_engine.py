@@ -1,5 +1,5 @@
 """
-Portfolio Rebalancing Engine — supports Bitget + MEXC.
+Portfolio Rebalancing Engine — trades on MEXC.
 Creates a portfolio of up to 20 coins, rebalances by time or deviation %.
 Includes robust replace_asset method.
 FIXED: added all_active() + load_from_db() (were missing → monitor crash)
@@ -33,7 +33,7 @@ class PortfolioConfig:
     rebalance_mode: str        # "time" | "percent"
     interval_hours: float = 0
     threshold_pct: float = 0
-    exchange: str = "bitget"   # "bitget" | "mexc"
+    exchange: str = "mexc"
 
 
 @dataclass
@@ -54,29 +54,25 @@ class Portfolio:
     status: str = "active"
     last_rebalance_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
-    exchange: str = "bitget"
+    exchange: str = "mexc"
 
 
-def _get_client(exchange: str = "bitget"):
-    """Return the correct exchange client."""
-    exchange = (exchange or "bitget").lower()
-    if exchange == "mexc":
-        from trading.mexc_client import get_mexc
-        return get_mexc()
-    from trading.bitget_client import get_bitget
-    return get_bitget()
+def _get_client(exchange: str = "mexc"):
+    """Return the MEXC client."""
+    from trading.mexc_client import get_mexc
+    return get_mexc()
 
 
 class RebalanceEngine:
 
-    def __init__(self, exchange: str = "bitget"):
-        self.exchange = exchange.lower()
+    def __init__(self, exchange: str = "mexc"):
+        self.exchange = "mexc"
         self.client = _get_client(self.exchange)
         self._portfolios: dict[str, Portfolio] = {}
 
     def set_exchange(self, exchange: str) -> None:
-        self.exchange = exchange.lower()
-        self.client = _get_client(self.exchange)
+        self.exchange = "mexc"
+        self.client = _get_client()
 
     # ── Active portfolios (FIX for monitor crash) ─────────────────────────────
 
@@ -98,8 +94,7 @@ class RebalanceEngine:
         total = 0
         for row in rows:
             try:
-                exchange = (row.get("exchange") or "bitget").lower()
-                eng = get_engine(exchange)
+                eng = get_engine()
                 if eng.load_portfolio(row["id"]):
                     total += 1
             except Exception as e:
@@ -112,7 +107,7 @@ class RebalanceEngine:
         p = self._portfolios.get(portfolio_id)
         if p:
             return p
-        # search other engines (mexc vs bitget)
+        # Keep this lookup compatible with portfolios already loaded in memory.
         for eng in list(_engines.values()):
             if eng is self:
                 continue
@@ -123,8 +118,7 @@ class RebalanceEngine:
         row = db.get_portfolio(portfolio_id)
         if not row or row.get("status") == "closed":
             return None
-        exchange = (row.get("exchange") or "bitget").lower()
-        eng = get_engine(exchange)
+        eng = get_engine()
         return eng.load_portfolio(portfolio_id)
 
     def all_portfolios(self) -> list[Portfolio]:
@@ -141,7 +135,7 @@ class RebalanceEngine:
     # ── Create ────────────────────────────────────────────────────────────────
 
     def create_portfolio(self, config: PortfolioConfig) -> Portfolio:
-        self.set_exchange(config.exchange or "bitget")
+        self.set_exchange("mexc")
         if not self.client.has_credentials():
             raise RuntimeError(
                 f"مفاتيح {(getattr(self.client, 'exchange_name', None) or self.exchange).upper()} API غير مُعيَّنة.\n"
@@ -255,7 +249,7 @@ class RebalanceEngine:
 
     def snapshot(self, portfolio: Portfolio) -> dict:
         # Ensure we use the correct client for this portfolio
-        exch = getattr(portfolio, "exchange", None) or portfolio.config.exchange or "bitget"
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -421,7 +415,7 @@ class RebalanceEngine:
             raise RuntimeError("العملة القديمة والجديدة متشابهتان")
 
         # Ensure correct exchange client
-        exch = getattr(portfolio, "exchange", None) or portfolio.config.exchange or "bitget"
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -568,7 +562,7 @@ class RebalanceEngine:
     def add_asset(self, portfolio: Portfolio, symbol: str, usdt_amount: float) -> dict:
         """Buy a new asset and add it to the portfolio."""
         actions, errors = [], []
-        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -643,7 +637,7 @@ class RebalanceEngine:
     def remove_asset(self, portfolio: Portfolio, symbol: str, sell: bool = True) -> dict:
         """Remove an asset from portfolio (optionally sell it)."""
         actions, errors = [], []
-        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -687,7 +681,7 @@ class RebalanceEngine:
     def add_funds(self, portfolio: Portfolio, usdt_amount: float) -> dict:
         """Add more USDT to the portfolio and buy proportionally."""
         actions, errors = [], []
-        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -719,7 +713,7 @@ class RebalanceEngine:
     def reduce_funds(self, portfolio: Portfolio, usdt_amount: float) -> dict:
         """Sell proportionally to reduce portfolio size."""
         actions, errors = [], []
-        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -762,7 +756,7 @@ class RebalanceEngine:
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def close_portfolio(self, portfolio: Portfolio, sell: bool = True) -> float:
-        exch = getattr(portfolio, "exchange", None) or portfolio.config.exchange or "bitget"
+        exch = "mexc"
         if exch != self.exchange:
             self.set_exchange(exch)
 
@@ -789,7 +783,7 @@ class RebalanceEngine:
             return None
         # db.py uses get_portfolio_assets (not get_assets)
         assets_rows = db.get_portfolio_assets(portfolio_id)
-        exchange = row.get("exchange") or "bitget"
+        exchange = "mexc"
         config = PortfolioConfig(
             total_investment=float(row.get("total_investment") or 0),
             assets=[AssetConfig(a["symbol"], float(a["target_pct"])) for a in assets_rows if a.get("status") == "active"],
@@ -827,8 +821,7 @@ class RebalanceEngine:
 _engines: dict[str, RebalanceEngine] = {}
 
 
-def get_engine(exchange: str = "bitget") -> RebalanceEngine:
-    exchange = (exchange or "bitget").lower()
-    if exchange not in _engines:
-        _engines[exchange] = RebalanceEngine(exchange)
-    return _engines[exchange]
+def get_engine(exchange: str = "mexc") -> RebalanceEngine:
+    if "mexc" not in _engines:
+        _engines["mexc"] = RebalanceEngine("mexc")
+    return _engines["mexc"]

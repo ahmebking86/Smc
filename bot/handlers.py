@@ -1,7 +1,4 @@
-"""
-All Telegram handlers — rebalance portfolio bot.
-Supports Bitget + MEXC.
-"""
+"""All Telegram handlers for the MEXC portfolio bot."""
 
 from __future__ import annotations
 import asyncio
@@ -21,12 +18,10 @@ from bot.keyboards import (
     close_all_confirm_kb, liquidate_wallet_confirm_kb,
     rebalance_mode_kb, portfolios_list, portfolio_actions,
     close_confirm, replace_asset_kb, delete_asset_kb, confirm_delete_kb,
-    exchange_select_kb,
-    exchange_choice_kb, confirm_add_asset_kb, asset_close_kb,
+    confirm_add_asset_kb, asset_close_kb,
 )
 from bot.states import (
-    WAIT_EXCHANGE_CHOICE,
-    WAIT_API_KEY, WAIT_API_SECRET, WAIT_PASSPHRASE,
+    WAIT_API_KEY, WAIT_API_SECRET,
     WAIT_SYMBOLS, WAIT_TOTAL_AMOUNT, WAIT_ALLOCATIONS,
     WAIT_REBALANCE_MODE, WAIT_TIME_INTERVAL, WAIT_THRESHOLD_PCT, WAIT_CONFIRM,
     WAIT_REPLACE_NEW_SYMBOL, WAIT_REPLACE_CONFIRM,
@@ -37,7 +32,6 @@ from bot.states import (
     WAIT_ADD_ASSET_CONFIRM,
 )
 from trading.rebalance_engine import get_engine, PortfolioConfig, AssetConfig
-from trading.bitget_client import get_bitget, invalidate_credentials_cache
 from trading.mexc_client import get_mexc, invalidate_mexc_credentials_cache
 from trading.monitor import pause_monitor, resume_monitor
 from database import db
@@ -78,18 +72,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return await _deny(update)
 
-    bitget_ok = await asyncio.to_thread(get_bitget().has_credentials)
-    mexc_ok   = await asyncio.to_thread(get_mexc().has_credentials)
-
-    bitget_status = "🟢 متصلة" if bitget_ok else "🔴 غير متصلة"
+    mexc_ok = await asyncio.to_thread(get_mexc().has_credentials)
     mexc_status   = "🟢 متصلة" if mexc_ok   else "🔴 غير متصلة"
 
     await _reply(update,
         "✨ <b>بوت إعادة توازن المحفظة</b> ✨\n"
         "<code>─────────────────────────</code>\n"
-        "🤖 يدير محفظتك على <b>Bitget</b> و <b>MEXC</b>\n\n"
+        "🤖 يدير محفظتك على <b>MEXC</b>\n\n"
         "📊 <b>حالة الاتصال:</b>\n"
-        f"• Bitget: {bitget_status}\n"
         f"• MEXC:   {mexc_status}\n\n"
         "👇 اختر من القائمة:",
         main_menu())
@@ -99,51 +89,14 @@ async def cb_main_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, ctx)
 
 
-# ── API setup (BitGet + MEXC) ─────────────────────────────────────────────────
+# ── MEXC API setup ────────────────────────────────────────────────────────────
 
 async def cb_setup_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not _authorized(update):
         await _deny(update)
         return ConversationHandler.END
     await _reply(update,
-        "🔑 <b>إعداد مفاتيح API</b>\n\n"
-        "اختر المنصة:",
-        exchange_choice_kb())
-    return WAIT_EXCHANGE_CHOICE
-
-
-async def cb_api_exchange(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    await q.answer()
-    if q.data == "api_exchange_bitget":
-        ctx.user_data["api_exchange"] = "bitget"
-        name = "BitGet"
-    else:
-        ctx.user_data["api_exchange"] = "mexc"
-        name = "MEXC"
-    await q.edit_message_text(
-        f"🔑 <b>إعداد مفاتيح {name}</b>\n\n"
-        "أرسل <b>API Key</b>:\n"
-        "(يمكنك إلغاء العملية بـ /cancel)",
-        parse_mode="HTML",
-        reply_markup=back_main(),
-    )
-    return WAIT_API_KEY
-
-
-async def cb_choose_exchange_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Legacy handler for exch_api_ pattern."""
-    if not _authorized(update):
-        await _deny(update)
-        return ConversationHandler.END
-    q = update.callback_query
-    await q.answer()
-    exchange = "mexc" if "mexc" in q.data else "bitget"
-    ctx.user_data.clear()
-    ctx.user_data["api_exchange"] = exchange
-    name = "MEXC" if exchange == "mexc" else "BitGet"
-    await _reply(update,
-        f"🔑 <b>إعداد مفاتيح {name}</b>\n\n"
+        "🔑 <b>إعداد مفاتيح MEXC API</b>\n\n"
         "أرسل <b>API Key</b>:\n"
         "(يمكنك إلغاء العملية بـ /cancel)",
         back_main())
@@ -158,42 +111,16 @@ async def got_api_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def got_api_secret(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data["api_secret"] = update.message.text.strip()
-    exchange = ctx.user_data.get("api_exchange", "bitget")
-    if exchange == "mexc":
-        key = ctx.user_data.get("api_key", "")
-        secret = ctx.user_data["api_secret"]
-        await asyncio.to_thread(db.set_setting, "mexc_api_key", key)
-        await asyncio.to_thread(db.set_setting, "mexc_api_secret", secret)
-        invalidate_mexc_credentials_cache()
-        client = get_mexc()
-        ok, hint = await asyncio.to_thread(client.validate_credentials)
-        if ok:
-            await update.message.reply_text(
-                "✅ <b>تم حفظ مفاتيح MEXC والتحقق بنجاح!</b>",
-                parse_mode="HTML", reply_markup=main_menu())
-        else:
-            await update.message.reply_text(
-                f"⚠️ حُفظت المفاتيح لكن التحقق فشل:\n<code>{_html.escape(hint)}</code>",
-                parse_mode="HTML", reply_markup=main_menu())
-        ctx.user_data.clear()
-        return ConversationHandler.END
-    await update.message.reply_text("أرسل <b>Passphrase</b>:", parse_mode="HTML")
-    return WAIT_PASSPHRASE
-
-
-async def got_passphrase(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     key = ctx.user_data.get("api_key", "")
     secret = ctx.user_data.get("api_secret", "")
-    phrase = update.message.text.strip()
-    await asyncio.to_thread(db.set_setting, "bitget_api_key", key)
-    await asyncio.to_thread(db.set_setting, "bitget_api_secret", secret)
-    await asyncio.to_thread(db.set_setting, "bitget_passphrase", phrase)
-    invalidate_credentials_cache()
-    client = get_bitget()
+    await asyncio.to_thread(db.set_setting, "mexc_api_key", key)
+    await asyncio.to_thread(db.set_setting, "mexc_api_secret", secret)
+    invalidate_mexc_credentials_cache()
+    client = get_mexc()
     ok, hint = await asyncio.to_thread(client.validate_credentials)
     if ok:
         await update.message.reply_text(
-            "✅ <b>تم حفظ مفاتيح Bitget والتحقق بنجاح!</b>",
+            "✅ <b>تم حفظ مفاتيح MEXC والتحقق بنجاح!</b>",
             parse_mode="HTML", reply_markup=main_menu())
     else:
         await update.message.reply_text(
@@ -210,34 +137,15 @@ async def cb_new_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         await _deny(update)
         return ConversationHandler.END
     ctx.user_data.clear()
-    await _reply(update,
-        "🆕 <b>إنشاء محفظة إعادة توازن</b>\n\n"
-        "اختر المنصة:",
-        exchange_select_kb("new"))
-    return WAIT_EXCHANGE_CHOICE  # FIXED: was ConversationHandler.END
-
-
-async def cb_choose_exchange_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _authorized(update):
-        await _deny(update)
-        return ConversationHandler.END
-    q = update.callback_query
-    await q.answer()
-    data = q.data  # exch_new_bitget | exch_new_mexc
-    exchange = "mexc" if "mexc" in data else "bitget"
-    ctx.user_data.clear()
-    ctx.user_data["exchange"] = exchange
-
-    client = get_mexc() if exchange == "mexc" else get_bitget()
-    name = "MEXC" if exchange == "mexc" else "BitGet"
+    client = get_mexc()
     if not await asyncio.to_thread(client.has_credentials):
         await _reply(update,
-            f"⚠️ يجب إعداد مفاتيح {name} API أولاً.\nاضغط ⚙️ إعدادات API.",
+            "⚠️ يجب إعداد مفاتيح MEXC API أولاً.\nاضغط ⚙️ إعدادات API.",
             main_menu())
         return ConversationHandler.END
 
     await _reply(update,
-        f"🆕 <b>إنشاء محفظة على {name}</b>\n\n"
+        "🆕 <b>إنشاء محفظة على MEXC</b>\n\n"
         f"أدخل أسماء العملات مفصولة بفاصلة (حد أقصى {MAX_ASSETS}):\n"
         "مثال: <code>BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT</code>\n\n"
         "💡 يمكنك إدخال عملة واحدة فقط.")
@@ -263,8 +171,7 @@ async def got_symbols(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(f"❌ الحد الأقصى {MAX_ASSETS} عملة. أعدت {len(unique)}.")
         return WAIT_SYMBOLS
 
-    exchange = ctx.user_data.get("exchange", "bitget")
-    client = get_mexc() if exchange == "mexc" else get_bitget()
+    client = get_mexc()
 
     async def _check(sym):
         try:
@@ -282,7 +189,7 @@ async def got_symbols(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             invalid.append(sym)
 
     if not valid:
-        await update.message.reply_text(f"❌ لم أجد أي عملة على {('MEXC' if exchange == 'mexc' else 'BitGet')}. حاول مجدداً:")
+        await update.message.reply_text("❌ لم أجد أي عملة على MEXC. حاول مجدداً:")
         return WAIT_SYMBOLS
 
     ctx.user_data["symbols"] = [s for s, _ in valid]
@@ -469,7 +376,7 @@ async def _show_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     allocs = ctx.user_data["allocations"]
     total = ctx.user_data["total_amount"]
     mode = ctx.user_data["rebalance_mode"]
-    exch = ctx.user_data.get("exchange", "bitget").upper()
+    exch = "MEXC"
     lines = [
         f"📋 <b>ملخص المحفظة — تأكيد الإنشاء</b> [{exch}]",
         "<code>─────────────────────────</code>",
@@ -510,7 +417,7 @@ async def cb_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         rebalance_mode=ctx.user_data["rebalance_mode"],
         interval_hours=ctx.user_data.get("interval_hours", 0),
         threshold_pct=ctx.user_data.get("threshold_pct", 0),
-        exchange=ctx.user_data.get("exchange", "bitget"),
+        exchange="mexc",
     )
     engine = get_engine(cfg.exchange)
     try:
@@ -565,13 +472,13 @@ async def cb_active_portfolios(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             "status": row.get("status", "active"),
             "asset_count": count,
             "total_investment": float(row.get("total_investment") or 0),
-            "exchange": row.get("exchange", "bitget"),
+            "exchange": "mexc",
         })
 
     lines = [f"📊 <b>المحافظ النشطة ({len(display)})</b>\n"]
     for d in display:
         lines.append(
-            f"• <code>{d['id'][:8]}</code> [{d.get('exchange','bitget').upper()}] — "
+            f"• <code>{d['id'][:8]}</code> [MEXC] — "
             f"{d['asset_count']} عملة — {d['total_investment']:.0f} USDT"
         )
     lines.append("\nاختر محفظة للتحكم بها:")
@@ -742,18 +649,18 @@ async def cb_liquidate_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         return await _deny(update)
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("⏳ جارٍ التصفية...")
-    # try both exchanges
     results = []
-    for name, getter in [("Bitget", get_bitget), ("MEXC", get_mexc)]:
-        try:
-            client = getter()
-            if await asyncio.to_thread(client.has_credentials):
-                res = await asyncio.to_thread(client.liquidate_wallet)
-                results.append(f"[{name}] أوامر: {res.get('cancelled_orders',0)}")
-                for s in res.get("sold", [])[:5]:
-                    results.append(f"  • {_html.escape(str(s))}")
-        except Exception as e:
-            results.append(f"[{name}] ❌ {e}")
+    try:
+        client = get_mexc()
+        if await asyncio.to_thread(client.has_credentials):
+            res = await asyncio.to_thread(client.liquidate_wallet)
+            results.append(f"[MEXC] أوامر: {res.get('cancelled_orders', 0)}")
+            for s in res.get("sold", [])[:5]:
+                results.append(f"  • {_html.escape(str(s))}")
+        else:
+            results.append("[MEXC] غير متصل")
+    except Exception as e:
+        results.append(f"[MEXC] ❌ {e}")
     lines = ["✅ اكتملت التصفية"] + results
     await _reply(update, "\n".join(lines), back_main())
 
@@ -764,12 +671,12 @@ async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return await _deny(update)
     lines = ["🏦 <b>رصيد المحفظة</b>\n"]
-    for name, getter in [("Bitget", get_bitget), ("MEXC", get_mexc)]:
-        try:
-            client = getter()
-            if not await asyncio.to_thread(client.has_credentials):
-                lines.append(f"• {name}: غير متصل")
-                continue
+    name = "MEXC"
+    try:
+        client = get_mexc()
+        if not await asyncio.to_thread(client.has_credentials):
+            lines.append(f"• {name}: غير متصل")
+        else:
             balances = await asyncio.to_thread(client.get_account_balance)
             total_usdt = 0.0
             lines.append(f"\n<b>{name}:</b>")
@@ -791,8 +698,8 @@ async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 total_usdt += val
                 lines.append(f"  • <code>{coin}</code>: {avail:.6g} ≈ {val:.2f} USDT")
             lines.append(f"  💵 الإجمالي: <b>{total_usdt:.2f} USDT</b>")
-        except Exception as e:
-            lines.append(f"• {name}: ❌ {_html.escape(str(e)[:80])}")
+    except Exception as e:
+        lines.append(f"• {name}: ❌ {_html.escape(str(e)[:80])}")
     await _reply(update, "\n".join(lines), back_main())
 
 
@@ -1153,8 +1060,7 @@ async def got_add_asset_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
     # تحقق إن العملة موجودة على المنصة
     try:
-        exchange = getattr(portfolio, "exchange", None) or getattr(getattr(portfolio, "config", None), "exchange", "bitget")
-        client = get_mexc() if exchange == "mexc" else get_bitget()
+        client = get_mexc()
         price = await asyncio.to_thread(client.get_price, raw)
         if not price or price <= 0:
             raise ValueError("سعر غير صالح")
@@ -1273,12 +1179,8 @@ def build_application(app) -> None:
     api_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_setup_api, pattern="^setup_api$")],
         states={
-            WAIT_EXCHANGE_CHOICE: [
-                CallbackQueryHandler(cb_api_exchange, pattern=r"^api_exchange_(bitget|mexc)$"),
-            ],
             WAIT_API_KEY:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_key)],
             WAIT_API_SECRET:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_secret)],
-            WAIT_PASSPHRASE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_passphrase)],
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
@@ -1291,10 +1193,6 @@ def build_application(app) -> None:
     new_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_new_portfolio, pattern="^new_portfolio$")],
         states={
-            # FIXED: exchange choice is inside the conversation
-            WAIT_EXCHANGE_CHOICE: [
-                CallbackQueryHandler(cb_choose_exchange_new, pattern=r"^exch_new_"),
-            ],
             WAIT_SYMBOLS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, got_symbols),
             ],
@@ -1408,6 +1306,4 @@ def build_application(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_delete_pick, pattern=r"^delete_pick_"))
     app.add_handler(CallbackQueryHandler(cb_delete_ok, pattern=r"^delete_ok_"))
     app.add_handler(CallbackQueryHandler(cb_performance, pattern=r"^performance_"))
-    app.add_handler(CallbackQueryHandler(cb_choose_exchange_api, pattern=r"^exch_api_"))
     app.add_handler(CallbackQueryHandler(cb_close_asset, pattern=r"^close_asset_"))
-    # NOTE: cb_choose_exchange_new is ONLY inside new_conv — do NOT register here

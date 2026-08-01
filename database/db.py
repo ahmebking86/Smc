@@ -1,6 +1,6 @@
 """
 PostgreSQL database layer — portfolios, assets, trades, settings.
-Supports Bitget + MEXC (exchange column on portfolios).
+Portfolios trade on MEXC.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS portfolios (
     last_rebalance_at     TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     closed_at             TIMESTAMPTZ,
-    exchange              TEXT        NOT NULL DEFAULT 'bitget'
+    exchange              TEXT        NOT NULL DEFAULT 'mexc'
 );
 
 CREATE TABLE IF NOT EXISTS portfolio_assets (
@@ -182,9 +182,21 @@ def _ensure_exchange_column(cur) -> None:
     if cur.fetchone() is None:
         cur.execute("""
             ALTER TABLE portfolios
-            ADD COLUMN exchange TEXT NOT NULL DEFAULT 'bitget'
+            ADD COLUMN exchange TEXT NOT NULL DEFAULT 'mexc'
         """)
         logger.info("✅ أُضيف عمود exchange لجدول portfolios.")
+
+    # Existing installations may have portfolios created before MEXC became
+    # the only supported exchange. Keep their records usable after upgrade.
+    cur.execute("""
+        UPDATE portfolios
+        SET exchange = 'mexc'
+        WHERE LOWER(COALESCE(exchange, '')) = 'bitget'
+    """)
+    cur.execute("""
+        DELETE FROM bot_settings
+        WHERE key IN ('bitget_api_key', 'bitget_api_secret', 'bitget_passphrase')
+    """)
 
 
 def init_db() -> None:
