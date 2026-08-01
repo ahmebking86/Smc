@@ -108,12 +108,16 @@ def portfolios_list(portfolios: list[dict]) -> InlineKeyboardMarkup:
 
 
 def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
+    """القائمة الرئيسية لإدارة المحفظة - النسخة المحدثة"""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 تحديث / إعادة توازن الآن", callback_data=f"rebalance_now_{portfolio_id}"),
         ],
         [
+            InlineKeyboardButton("➕ إضافة عملة", callback_data=f"add_asset_{portfolio_id}"),
             InlineKeyboardButton("🔁 استبدال عملة", callback_data=f"replace_{portfolio_id}"),
+        ],
+        [
             InlineKeyboardButton("🗑 حذف عملة", callback_data=f"delete_asset_{portfolio_id}"),
         ],
         [
@@ -135,6 +139,7 @@ def portfolio_actions(portfolio_id: str) -> InlineKeyboardMarkup:
 
 
 def portfolio_actions_v2(portfolio_id: str) -> InlineKeyboardMarkup:
+    """Alias للتوافق مع الكود القديم"""
     return portfolio_actions(portfolio_id)
 
 
@@ -191,6 +196,15 @@ def confirm_delete_kb(portfolio_id: str, symbol: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ نعم، احذف وبيع", callback_data=f"delete_ok_{portfolio_id}_{symbol}"),
+            InlineKeyboardButton("❌ لا", callback_data=f"portfolio_{portfolio_id}"),
+        ]
+    ])
+
+
+def confirm_add_asset_kb(portfolio_id: str, symbol: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ نعم، أضف العملة", callback_data=f"add_asset_ok_{portfolio_id}_{symbol}"),
             InlineKeyboardButton("❌ لا", callback_data=f"portfolio_{portfolio_id}"),
         ]
     ])

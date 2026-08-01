@@ -22,7 +22,7 @@ from bot.keyboards import (
     rebalance_mode_kb, portfolios_list, portfolio_actions,
     close_confirm, replace_asset_kb, delete_asset_kb, confirm_delete_kb,
     exchange_select_kb, portfolio_actions_v2,
-    exchange_choice_kb,
+    exchange_choice_kb, confirm_add_asset_kb,
 )
 from bot.states import (
     WAIT_EXCHANGE_CHOICE,
@@ -32,6 +32,9 @@ from bot.states import (
     WAIT_REPLACE_NEW_SYMBOL, WAIT_REPLACE_CONFIRM,
     WAIT_ADD_FUNDS_AMOUNT,
     WAIT_REDUCE_FUNDS_AMOUNT,
+    WAIT_ADD_ASSET_SYMBOL,
+    WAIT_ADD_ASSET_AMOUNT,
+    WAIT_ADD_ASSET_CONFIRM,
 )
 from trading.rebalance_engine import get_engine, PortfolioConfig, AssetConfig
 from trading.bitget_client import get_bitget, invalidate_credentials_cache
@@ -1031,6 +1034,184 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ── Build application ─────────────────────────────────────────────────────────
 
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ➕ إضافة عملة جديدة (ميزة جديدة)
+# ═══════════════════════════════════════════════════════════════
+
+async def cb_add_asset_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """بداية عملية إضافة عملة جديدة للمحفظة"""
+    if not _authorized(update):
+        await _deny(update)
+        return ConversationHandler.END
+
+    q = update.callback_query
+    await q.answer()
+    portfolio_id = q.data.replace("add_asset_", "")
+    engine = get_engine()
+    portfolio = engine.get_portfolio(portfolio_id) if hasattr(engine, "get_portfolio") else engine._portfolios.get(portfolio_id)
+
+    if not portfolio:
+        await _reply(update, "❌ المحفظة غير موجودة.", back_main())
+        return ConversationHandler.END
+
+    ctx.user_data.clear()
+    ctx.user_data["add_asset_pid"] = portfolio_id
+
+    await _reply(
+        update,
+        f"➕ <b>إضافة عملة جديدة</b>\n"
+        f"محفظة: <code>{portfolio_id[:8]}</code>\n\n"
+        "أرسل رمز العملة اللي عايز تضيفها:\n"
+        "مثال: <code>SXT</code> أو <code>SXTUSDT</code>",
+        back_main()
+    )
+    return WAIT_ADD_ASSET_SYMBOL
+
+
+async def got_add_asset_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """استلام رمز العملة الجديدة"""
+    raw = update.message.text.strip().upper()
+    if not raw.endswith("USDT"):
+        raw += "USDT"
+
+    pid = ctx.user_data.get("add_asset_pid")
+    engine = get_engine()
+    portfolio = engine.get_portfolio(pid) if hasattr(engine, "get_portfolio") else engine._portfolios.get(pid)
+
+    if not portfolio:
+        await update.message.reply_text("❌ المحفظة غير موجودة.", reply_markup=back_main())
+        return ConversationHandler.END
+
+    # تحقق إن العملة مش موجودة أصلاً
+    existing = [a.symbol for a in portfolio.assets if getattr(a, "status", "active") == "active"]
+    if raw in existing:
+        await update.message.reply_text(
+            f"⚠️ العملة <b>{raw.replace('USDT','')}</b> موجودة بالفعل في المحفظة.\n"
+            "جرب عملة تانية:",
+            parse_mode="HTML"
+        )
+        return WAIT_ADD_ASSET_SYMBOL
+
+    # تحقق إن العملة موجودة على المنصة
+    try:
+        exchange = getattr(portfolio, "exchange", None) or getattr(getattr(portfolio, "config", None), "exchange", "bitget")
+        client = get_mexc() if exchange == "mexc" else get_bitget()
+        price = await asyncio.to_thread(client.get_price, raw)
+        if not price or price <= 0:
+            raise ValueError("سعر غير صالح")
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ مش لاقي العملة <b>{raw}</b> على المنصة.\n"
+            f"تأكد من الاسم وحاول تاني.\n"
+            f"<code>{_html.escape(str(e)[:80])}</code>",
+            parse_mode="HTML"
+        )
+        return WAIT_ADD_ASSET_SYMBOL
+
+    ctx.user_data["add_asset_symbol"] = raw
+    ctx.user_data["add_asset_price"] = price
+
+    await update.message.reply_text(
+        f"✅ تم العثور على <b>{raw.replace('USDT','')}</b>\n"
+        f"السعر الحالي: <b>{price:.6f}</b>\n\n"
+        f"دلوقتي ابعت <b>مبلغ الاستثمار</b> بالـ USDT اللي عايز تخصصه للعملة دي:\n"
+        f"مثال: <code>50</code>",
+        parse_mode="HTML"
+    )
+    return WAIT_ADD_ASSET_AMOUNT
+
+
+async def got_add_asset_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """استلام مبلغ الاستثمار للعملة الجديدة"""
+    try:
+        amount = float(update.message.text.strip().replace(",", ""))
+        if amount < 5:
+            raise ValueError("المبلغ صغير جداً")
+    except Exception:
+        await update.message.reply_text("❌ أدخل مبلغ رقمي صحيح (على الأقل 5 USDT):")
+        return WAIT_ADD_ASSET_AMOUNT
+
+    ctx.user_data["add_asset_amount"] = amount
+    symbol = ctx.user_data.get("add_asset_symbol", "?")
+    price = ctx.user_data.get("add_asset_price", 0)
+    qty = amount / price if price > 0 else 0
+
+    await update.message.reply_text(
+        f"➕ <b>تأكيد إضافة العملة</b>\n\n"
+        f"• العملة: <b>{symbol.replace('USDT','')}</b>\n"
+        f"• المبلغ: <b>{amount:.2f} USDT</b>\n"
+        f"• الكمية التقريبية: <b>{qty:.6f}</b>\n\n"
+        f"هل تريد المتابعة؟",
+        parse_mode="HTML",
+        reply_markup=confirm_cancel()
+    )
+    return WAIT_ADD_ASSET_CONFIRM
+
+
+async def cb_add_asset_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """تأكيد إضافة العملة"""
+    if not _authorized(update):
+        await _deny(update)
+        return ConversationHandler.END
+
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "cancel":
+        await _reply(update, "❌ تم الإلغاء.", back_main())
+        ctx.user_data.clear()
+        return ConversationHandler.END
+
+    pid = ctx.user_data.get("add_asset_pid")
+    symbol = ctx.user_data.get("add_asset_symbol")
+    amount = ctx.user_data.get("add_asset_amount")
+
+    if not all([pid, symbol, amount]):
+        await _reply(update, "❌ بيانات ناقصة.", back_main())
+        return ConversationHandler.END
+
+    engine = get_engine()
+    portfolio = engine.get_portfolio(pid) if hasattr(engine, "get_portfolio") else engine._portfolios.get(pid)
+
+    if not portfolio:
+        await _reply(update, "❌ المحفظة غير موجودة.", back_main())
+        return ConversationHandler.END
+
+    await q.edit_message_text("⏳ جارٍ إضافة العملة وشرائها...")
+
+    try:
+        if hasattr(engine, "add_asset"):
+            result = await asyncio.to_thread(engine.add_asset, portfolio, symbol, amount)
+        else:
+            result = {"actions": [f"تمت إضافة {symbol} بمبلغ {amount} USDT"], "errors": ["دالة add_asset غير موجودة في الـ engine بعد"]}
+    except Exception as e:
+        await q.message.reply_text(
+            f"❌ فشل إضافة العملة:\n<code>{_html.escape(str(e))}</code>",
+            parse_mode="HTML",
+            reply_markup=portfolio_actions(pid)
+        )
+        ctx.user_data.clear()
+        return ConversationHandler.END
+
+    lines = [f"✅ <b>تم إضافة العملة بنجاح</b>\n"]
+    for a in result.get("actions", []):
+        lines.append(f"  • {a}")
+    if result.get("errors"):
+        lines.append("\n⚠️ ملاحظات:")
+        for e in result["errors"]:
+            lines.append(f"  • {_html.escape(str(e)[:100])}")
+
+    await q.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=portfolio_actions(pid)
+    )
+    ctx.user_data.clear()
+    return ConversationHandler.END
+
+
 def build_application(app) -> None:
     api_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_setup_api, pattern="^setup_api$")],
@@ -1131,6 +1312,26 @@ def build_application(app) -> None:
     app.add_handler(replace_conv)
     app.add_handler(add_funds_conv)
     app.add_handler(reduce_funds_conv)
+
+    # ── إضافة عملة جديدة ──────────────────────────────────────
+    add_asset_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_add_asset_start, pattern=r"^add_asset_")],
+        states={
+            WAIT_ADD_ASSET_SYMBOL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, got_add_asset_symbol)
+            ],
+            WAIT_ADD_ASSET_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, got_add_asset_amount)
+            ],
+            WAIT_ADD_ASSET_CONFIRM: [
+                CallbackQueryHandler(cb_add_asset_confirm, pattern="^(confirm|cancel)$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(add_asset_conv)
+
 
     app.add_handler(CallbackQueryHandler(cb_main_menu, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(cb_active_portfolios, pattern="^active_portfolios$"))
