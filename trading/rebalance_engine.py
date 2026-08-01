@@ -590,7 +590,7 @@ class RebalanceEngine:
 
         qty = usdt_amount / price
         try:
-            order = self.client.place_market_order(symbol, "buy", usdt_amount)
+            order = self.client.place_market_buy_usdt(symbol, usdt_amount)
             actions.append(f"تم شراء {symbol} بمبلغ {usdt_amount:.2f} USDT")
         except Exception as e:
             errors.append(f"فشل الشراء: {e}")
@@ -702,7 +702,7 @@ class RebalanceEngine:
             if portion < 5:
                 continue
             try:
-                self.client.place_market_order(a.symbol, "buy", portion)
+                self.client.place_market_buy_usdt(a.symbol, portion)
                 actions.append(f"شراء إضافي {a.symbol}: {portion:.2f} USDT")
             except Exception as e:
                 errors.append(f"فشل شراء {a.symbol}: {e}")
@@ -741,8 +741,11 @@ class RebalanceEngine:
             if sell_usdt < 5:
                 continue
             try:
-                self.client.place_market_order(sym, "sell", sell_usdt)
-                actions.append(f"بيع جزئي {sym}: {sell_usdt:.2f} USDT")
+                price = self.client.get_price(sym)
+                qty = sell_usdt / price if price > 0 else 0
+                if qty > 0:
+                    self.client.place_market_sell(sym, qty)
+                    actions.append(f"بيع جزئي {sym}: {sell_usdt:.2f} USDT")
             except Exception as e:
                 errors.append(f"فشل بيع {sym}: {e}")
 
