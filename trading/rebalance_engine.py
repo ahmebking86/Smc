@@ -562,6 +562,200 @@ class RebalanceEngine:
             "usdt_value": usdt_value,
         }
 
+
+    # ── Add / Remove / Funds (NEW) ─────────────────────────────────────────────
+
+    def add_asset(self, portfolio: Portfolio, symbol: str, usdt_amount: float) -> dict:
+        """Buy a new asset and add it to the portfolio."""
+        actions, errors = [], []
+        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        if exch != self.exchange:
+            self.set_exchange(exch)
+
+        symbol = symbol.upper()
+        if not symbol.endswith("USDT"):
+            symbol += "USDT"
+
+        # Check if already exists
+        for a in portfolio.assets:
+            if a.symbol == symbol and a.status == "active":
+                return {"actions": [], "errors": [f"{symbol} موجودة بالفعل"], "success": False}
+
+        try:
+            price = self.client.get_price(symbol)
+            if not price or price <= 0:
+                raise ValueError(f"سعر غير صالح لـ {symbol}")
+        except Exception as e:
+            return {"actions": [], "errors": [f"فشل جلب السعر: {e}"], "success": False}
+
+        qty = usdt_amount / price
+        try:
+            order = self.client.place_market_order(symbol, "buy", usdt_amount)
+            actions.append(f"تم شراء {symbol} بمبلغ {usdt_amount:.2f} USDT")
+        except Exception as e:
+            errors.append(f"فشل الشراء: {e}")
+            return {"actions": actions, "errors": errors, "success": False}
+
+        # Calculate new target_pct (equal weight roughly)
+        active = [a for a in portfolio.assets if a.status == "active"]
+        n = len(active) + 1
+        new_pct = round(100.0 / n, 2)
+
+        # Optionally re-scale existing targets
+        for a in active:
+            a.target_pct = round(a.target_pct * (n - 1) / n, 2)
+
+        new_asset_id = str(uuid.uuid4())
+        try:
+            db.create_asset({
+                "id": new_asset_id,
+                "portfolio_id": portfolio.id,
+                "symbol": symbol,
+                "target_pct": new_pct,
+                "initial_qty": qty,
+                "status": "active",
+            })
+            # update other assets target_pct in DB
+            for a in active:
+                try:
+                    db.update_asset(a.id, {"target_pct": a.target_pct})
+                except Exception:
+                    pass
+        except Exception as e:
+            errors.append(f"تم الشراء لكن فشل تحديث DB: {e}")
+
+        portfolio.assets.append(PortfolioAsset(
+            id=new_asset_id,
+            symbol=symbol,
+            target_pct=new_pct,
+            initial_qty=qty,
+            status="active",
+        ))
+        portfolio.config.total_investment = float(portfolio.config.total_investment or 0) + usdt_amount
+        try:
+            db.update_portfolio(portfolio.id, {"total_investment": portfolio.config.total_investment})
+        except Exception:
+            pass
+
+        actions.append(f"تمت إضافة {symbol} بنسبة {new_pct}%")
+        return {"actions": actions, "errors": errors, "success": len(errors) == 0}
+
+    def remove_asset(self, portfolio: Portfolio, symbol: str, sell: bool = True) -> dict:
+        """Remove an asset from portfolio (optionally sell it)."""
+        actions, errors = [], []
+        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        if exch != self.exchange:
+            self.set_exchange(exch)
+
+        symbol = symbol.upper()
+        asset = None
+        for a in portfolio.assets:
+            if a.symbol == symbol and a.status == "active":
+                asset = a
+                break
+
+        if not asset:
+            return {"actions": [], "errors": [f"{symbol} غير موجودة أو غير نشطة"], "success": False}
+
+        if sell:
+            try:
+                self.client.close_all_at_market([symbol])
+                actions.append(f"تم بيع {symbol}")
+            except Exception as e:
+                errors.append(f"فشل البيع: {e}")
+
+        asset.status = "closed"
+        try:
+            db.update_asset(asset.id, {"status": "closed"})
+        except Exception as e:
+            errors.append(f"فشل تحديث حالة الأصل: {e}")
+
+        # Redistribute target_pct among remaining
+        active = [a for a in portfolio.assets if a.status == "active"]
+        if active:
+            equal = round(100.0 / len(active), 2)
+            for a in active:
+                a.target_pct = equal
+                try:
+                    db.update_asset(a.id, {"target_pct": equal})
+                except Exception:
+                    pass
+
+        actions.append(f"تم حذف {symbol} من المحفظة")
+        return {"actions": actions, "errors": errors, "success": len(errors) == 0}
+
+    def add_funds(self, portfolio: Portfolio, usdt_amount: float) -> dict:
+        """Add more USDT to the portfolio and buy proportionally."""
+        actions, errors = [], []
+        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        if exch != self.exchange:
+            self.set_exchange(exch)
+
+        active = [a for a in portfolio.assets if a.status == "active"]
+        if not active:
+            return {"actions": [], "errors": ["لا توجد عملات نشطة"], "success": False}
+
+        total_pct = sum(a.target_pct for a in active) or 100.0
+
+        for a in active:
+            portion = usdt_amount * (a.target_pct / total_pct)
+            if portion < 5:
+                continue
+            try:
+                self.client.place_market_order(a.symbol, "buy", portion)
+                actions.append(f"شراء إضافي {a.symbol}: {portion:.2f} USDT")
+            except Exception as e:
+                errors.append(f"فشل شراء {a.symbol}: {e}")
+
+        portfolio.config.total_investment = float(portfolio.config.total_investment or 0) + usdt_amount
+        try:
+            db.update_portfolio(portfolio.id, {"total_investment": portfolio.config.total_investment})
+        except Exception as e:
+            errors.append(f"فشل تحديث مبلغ الاستثمار: {e}")
+
+        actions.append(f"تمت زيادة الاستثمار بـ {usdt_amount:.2f} USDT")
+        return {"actions": actions, "errors": errors, "success": len(errors) == 0}
+
+    def reduce_funds(self, portfolio: Portfolio, usdt_amount: float) -> dict:
+        """Sell proportionally to reduce portfolio size."""
+        actions, errors = [], []
+        exch = getattr(portfolio, "exchange", None) or getattr(portfolio.config, "exchange", "bitget")
+        if exch != self.exchange:
+            self.set_exchange(exch)
+
+        active = [a for a in portfolio.assets if a.status == "active"]
+        if not active:
+            return {"actions": [], "errors": ["لا توجد عملات نشطة"], "success": False}
+
+        snap = self.snapshot(portfolio)
+        total_value = snap.get("total_value") or 0
+        if total_value <= 0:
+            return {"actions": [], "errors": ["قيمة المحفظة صفر"], "success": False}
+
+        ratio = min(usdt_amount / total_value, 0.95)  # max 95%
+
+        for item in snap.get("assets", []):
+            sym = item.get("symbol")
+            val = item.get("value") or 0
+            sell_usdt = val * ratio
+            if sell_usdt < 5:
+                continue
+            try:
+                self.client.place_market_order(sym, "sell", sell_usdt)
+                actions.append(f"بيع جزئي {sym}: {sell_usdt:.2f} USDT")
+            except Exception as e:
+                errors.append(f"فشل بيع {sym}: {e}")
+
+        portfolio.config.total_investment = max(0, float(portfolio.config.total_investment or 0) - usdt_amount)
+        try:
+            db.update_portfolio(portfolio.id, {"total_investment": portfolio.config.total_investment})
+        except Exception as e:
+            errors.append(f"فشل تحديث مبلغ الاستثمار: {e}")
+
+        actions.append(f"تم تخفيف الاستثمار بـ {usdt_amount:.2f} USDT")
+        return {"actions": actions, "errors": errors, "success": len(errors) == 0}
+
+
     # ── Close ─────────────────────────────────────────────────────────────────
 
     def close_portfolio(self, portfolio: Portfolio, sell: bool = True) -> float:
