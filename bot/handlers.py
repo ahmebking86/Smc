@@ -21,8 +21,8 @@ from bot.keyboards import (
     close_all_confirm_kb, liquidate_wallet_confirm_kb,
     rebalance_mode_kb, portfolios_list, portfolio_actions,
     close_confirm, replace_asset_kb, delete_asset_kb, confirm_delete_kb,
-    exchange_select_kb, portfolio_actions_v2,
-    exchange_choice_kb, confirm_add_asset_kb,
+    exchange_select_kb,
+    exchange_choice_kb, confirm_add_asset_kb, asset_close_kb,
 )
 from bot.states import (
     WAIT_EXCHANGE_CHOICE,
@@ -1049,6 +1049,38 @@ async def cb_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(report, parse_mode="HTML", reply_markup=portfolio_actions(portfolio_id))
 
 
+# ── بيع عملة واحدة من المحفظة ────────────────────────────────────────────────
+
+async def cb_close_asset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if not _authorized(update):
+        return await _deny(update)
+    # format: close_asset_{portfolio_id}_{symbol}
+    parts = q.data.split("_", 3)
+    if len(parts) < 4:
+        await q.answer("بيانات غير صحيحة", show_alert=True)
+        return
+    portfolio_id = parts[2]
+    symbol = parts[3]
+    engine = get_engine()
+    portfolio = engine._portfolios.get(portfolio_id)
+    if not portfolio:
+        await q.answer("المحفظة غير موجودة", show_alert=True)
+        return
+    try:
+        result = await asyncio.to_thread(engine.remove_asset, portfolio, symbol, sell=True)
+        actions = "\n".join(result.get("actions", []) + result.get("errors", []))
+        await q.edit_message_text(
+            f"✅ <b>تم بيع {symbol}</b>\n\n{actions}" if result.get("ok") else f"❌ فشل بيع {symbol}\n{actions}",
+            parse_mode="HTML",
+            reply_markup=portfolio_actions(portfolio_id),
+        )
+    except Exception as e:
+        await q.edit_message_text(f"❌ خطأ: {_html.escape(str(e))}", parse_mode="HTML",
+                                   reply_markup=portfolio_actions(portfolio_id))
+
+
 # ── Cancel command ────────────────────────────────────────────────────────────
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1377,4 +1409,5 @@ def build_application(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_delete_ok, pattern=r"^delete_ok_"))
     app.add_handler(CallbackQueryHandler(cb_performance, pattern=r"^performance_"))
     app.add_handler(CallbackQueryHandler(cb_choose_exchange_api, pattern=r"^exch_api_"))
+    app.add_handler(CallbackQueryHandler(cb_close_asset, pattern=r"^close_asset_"))
     # NOTE: cb_choose_exchange_new is ONLY inside new_conv — do NOT register here
