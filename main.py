@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import config.settings as config
 from database.models import init_db, is_paused, set_paused
 from judge.processor import process_new_signals
+from judge.risk_manager import check_stops_and_tps
 from exchange.mexc_client import mexc
 from tg_bot.handlers import setup_handlers
 from utils.logger import setup_logger
@@ -43,6 +44,15 @@ async def main():
         "interval",
         seconds=30,
         id="judge_cycle",
+        max_instances=1,
+        kwargs={"app": app},
+    )
+    # Check stop loss / take profit every 45 seconds
+    scheduler.add_job(
+        check_stops_and_tps,
+        "interval",
+        seconds=45,
+        id="risk_cycle",
         max_instances=1,
         kwargs={"app": app},
     )
