@@ -12,6 +12,7 @@ import config.settings as config
 from database.models import init_db, is_paused, set_paused
 from judge.processor import process_new_signals
 from exchange.mexc_client import mexc
+from tg_bot.handlers import setup_handlers
 from utils.logger import setup_logger
 
 
@@ -34,6 +35,7 @@ async def main():
         return
 
     app = Application.builder().token(config.TG_TOKEN).build()
+    setup_handlers(app)
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
