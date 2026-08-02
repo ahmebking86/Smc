@@ -14,6 +14,8 @@ from judge.processor import process_new_signals
 from judge.risk_manager import check_stops_and_tps
 from exchange.mexc_client import mexc
 from tg_bot.handlers import setup_handlers
+from judge.channel_listener import handle_channel_message
+from telegram.ext import MessageHandler, filters
 from utils.logger import setup_logger
 
 
